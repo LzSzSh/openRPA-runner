@@ -1,0 +1,69 @@
+diff --git a/OpenRPA.Utilities/Activities/StartProcess.cs b/OpenRPA.Utilities/Activities/StartProcess.cs
+index d835e2a6..9de1d1a3 100644
+--- a/OpenRPA.Utilities/Activities/StartProcess.cs
++++ b/OpenRPA.Utilities/Activities/StartProcess.cs
+@@ -15,6 +15,7 @@ using System.Data;
+ using Microsoft.VisualBasic.FileIO;
+ using System.Text.RegularExpressions;
+ using System.Windows;
++using System.IO;
+ 
+ namespace OpenRPA.Utilities
+ {
+@@ -42,6 +43,27 @@ namespace OpenRPA.Utilities
+             var waitforexittimeout = WaitForExitTimeout.Get(context);
+             ProcessStartInfo startInfo = new ProcessStartInfo();
+             filename = Environment.ExpandEnvironmentVariables(filename);
++
++            // Maxwell runs workflows in an isolated Chromium profile. Always
++            // route browser launches through the bundled browser, regardless of
++            // whether a workflow uses an executable path, a shortcut, a bare
++            // command such as "Chrome", or a URL as the launch target.
++            string maxwellChrome = Environment.GetEnvironmentVariable("MAXWELL_BUNDLED_CHROME");
++            if (TryGetBrowserUrl(filename, out string browserUrl) &&
++                !string.IsNullOrWhiteSpace(maxwellChrome) && File.Exists(maxwellChrome))
++            {
++                string maxwellProfile = Environment.GetEnvironmentVariable("MAXWELL_BROWSER_PROFILE");
++                string maxwellExtension = Environment.GetEnvironmentVariable("MAXWELL_BROWSER_EXTENSION");
++                string prefix = "--no-first-run --no-default-browser-check --disable-default-apps --allow-file-access-from-files";
++                if (!string.IsNullOrWhiteSpace(maxwellProfile)) prefix += " --user-data-dir=\"" + maxwellProfile + "\"";
++                if (!string.IsNullOrWhiteSpace(maxwellExtension) && Directory.Exists(maxwellExtension)) prefix += " --load-extension=\"" + maxwellExtension + "\"";
++
++                filename = maxwellChrome;
++                arguments = prefix + (string.IsNullOrWhiteSpace(browserUrl) ? string.Empty : " \"" + browserUrl + "\"") +
++                    (string.IsNullOrWhiteSpace(arguments) ? string.Empty : " " + arguments);
++                workingdirectory = Path.GetDirectoryName(maxwellChrome);
++            }
++
+             startInfo.FileName = filename;
+             startInfo.Arguments = arguments;
+             startInfo.WorkingDirectory = workingdirectory;
+@@ -58,7 +80,26 @@ namespace OpenRPA.Utilities
+             }
+         }
+ 
++        private static bool TryGetBrowserUrl(string filename, out string browserUrl)
++        {
++            browserUrl = null;
++            if (string.IsNullOrWhiteSpace(filename)) return false;
++
++            string target = filename.Trim().Trim('\"');
++            if (Uri.TryCreate(target, UriKind.Absolute, out Uri uri) &&
++                (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps))
++            {
++                browserUrl = target;
++                return true;
++            }
++
++            string name = Path.GetFileName(target).Trim();
++            string normalizedName = Path.GetFileNameWithoutExtension(name).Trim();
++            string[] browserNames = { "chrome", "google chrome", "chromium", "chromium-browser", "msedge", "microsoft edge", "edge", "firefox", "brave", "opera" };
++            return browserNames.Any(browserName => string.Equals(normalizedName, browserName, StringComparison.OrdinalIgnoreCase));
++        }
++
+     }
+ 
+ 
+-}
+\ No newline at end of file
++}
