@@ -597,6 +597,22 @@
                         BorderThickness="1"
                         CornerRadius="10">
                     <StackPanel>
+                        <TextBlock Text="工作流浏览器"
+                                   FontSize="18"
+                                   FontWeight="SemiBold" />
+                        <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                            <RadioButton Content="使用 Maxwell 内置浏览器"
+                                         IsChecked="{Binding UseBundledBrowser, Mode=TwoWay}"
+                                         GroupName="BrowserLaunchMode"
+                                         Margin="0,0,24,0" />
+                            <RadioButton Content="使用本机浏览器"
+                                         IsChecked="{Binding UseLocalBrowser, Mode=TwoWay}"
+                                         GroupName="BrowserLaunchMode" />
+                        </StackPanel>
+                        <TextBlock Text="{Binding BrowserLaunchDescription}"
+                                   Foreground="{StaticResource TextMutedBrush}"
+                                   TextWrapping="Wrap"
+                                   Margin="0,7,0,22" />
                         <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*" />

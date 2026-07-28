@@ -42,6 +42,7 @@ public sealed class MainViewModel : ObservableObject
     private bool _isRecentHeaderSelected;
     private ChromeAutomationStatus _chromeAutomationStatus = new();
     private string? _chromeAutomationMessage;
+    private bool _useBundledBrowser;
 
     public MainViewModel()
     {
@@ -49,6 +50,7 @@ public sealed class MainViewModel : ObservableObject
         _projectFolder = _settings.LastProjectFolder;
         _runHotkey = _settings.RunHotkey;
         _stopHotkey = _settings.StopHotkey;
+        _useBundledBrowser = !string.Equals(_settings.BrowserLaunchMode, "Local", StringComparison.OrdinalIgnoreCase);
 
         BrowseProjectCommand = new RelayCommand(_ => BrowseProjectFolder());
         OpenProjectFolderCommand = new RelayCommand(_ => OpenProjectFolder(), _ => !string.IsNullOrWhiteSpace(ProjectFolder) && Directory.Exists(ProjectFolder));
@@ -177,6 +179,33 @@ public sealed class MainViewModel : ObservableObject
         get => _chromeAutomationMessage;
         private set => SetProperty(ref _chromeAutomationMessage, value);
     }
+
+    public bool UseBundledBrowser
+    {
+        get => _useBundledBrowser;
+        set
+        {
+            if (SetProperty(ref _useBundledBrowser, value))
+            {
+                OnPropertyChanged(nameof(UseLocalBrowser));
+                OnPropertyChanged(nameof(BrowserLaunchDescription));
+                SaveSettings();
+            }
+        }
+    }
+
+    public bool UseLocalBrowser
+    {
+        get => !UseBundledBrowser;
+        set
+        {
+            if (value) UseBundledBrowser = false;
+        }
+    }
+
+    public string BrowserLaunchDescription => UseBundledBrowser
+        ? "工作流中的浏览器启动将使用 Maxwell 内置 Chromium 和独立资料目录。"
+        : "工作流中的浏览器启动将使用本机安装的浏览器；请自行安装并启用所需扩展。";
 
     public string RunHotkeyText => string.IsNullOrWhiteSpace(RunHotkey) ? "未设置" : RunHotkey;
     public string StopHotkeyText => string.IsNullOrWhiteSpace(StopHotkey) ? "未设置" : StopHotkey;
@@ -545,7 +574,7 @@ public sealed class MainViewModel : ObservableObject
 
         try
         {
-            MaxwellRuntimeRunResult runResult = await _runtimeRunner.RunAsync(workflow);
+            MaxwellRuntimeRunResult runResult = await _runtimeRunner.RunAsync(workflow, UseBundledBrowser);
             if (_stopRequested)
             {
                 workflow.LastRunStatus = "已停止";
@@ -757,7 +786,7 @@ public sealed class MainViewModel : ObservableObject
     {
         try
         {
-            if (!string.IsNullOrWhiteSpace(BundledChromeLocator.FindBundledExtensionDirectory()))
+            if (UseBundledBrowser && !string.IsNullOrWhiteSpace(BundledChromeLocator.FindBundledExtensionDirectory()))
             {
                 _browserBootstrapper.LaunchExtensionManagementPage();
                 ChromeAutomationMessage = "已启动 Maxwell 内置浏览器，并在独立资料目录中加载了包内 OpenRPA 浏览器扩展。请在扩展页确认该扩展已启用。";
@@ -780,7 +809,9 @@ public sealed class MainViewModel : ObservableObject
             }
 
             Process.Start(new ProcessStartInfo(extensionSearchUrl) { UseShellExecute = true });
-            ChromeAutomationMessage = "已打开 Chrome 网上应用店的 OpenRPA 搜索页。安装并启用扩展后，请完全退出并重新打开 Chrome。";
+            ChromeAutomationMessage = UseBundledBrowser
+                ? "已打开 Chrome 网上应用店的 OpenRPA 搜索页。安装并启用扩展后，请完全退出并重新打开 Chrome。"
+                : "已用本机默认浏览器打开 OpenRPA 扩展搜索页。安装并启用扩展后，请完全退出并重新打开该浏览器。";
         }
         catch (Exception ex)
         {
@@ -1002,6 +1033,7 @@ public sealed class MainViewModel : ObservableObject
         _settings.LastProjectFolder = ProjectFolder;
         _settings.RunHotkey = RunHotkey;
         _settings.StopHotkey = StopHotkey;
+        _settings.BrowserLaunchMode = UseBundledBrowser ? "Bundled" : "Local";
         _settingsService.Save(_settings);
     }
 

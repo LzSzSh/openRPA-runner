@@ -12,7 +12,10 @@ public sealed class MaxwellRuntimeRunner
     private Process? _currentProcess;
     private CancellationTokenSource? _currentRunCancellation;
 
-    public async Task<MaxwellRuntimeRunResult> RunAsync(WorkflowItem workflow, CancellationToken cancellationToken = default)
+    public async Task<MaxwellRuntimeRunResult> RunAsync(
+        WorkflowItem workflow,
+        bool useBundledBrowser,
+        CancellationToken cancellationToken = default)
     {
         using CancellationTokenSource runCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         Process process;
@@ -39,25 +42,28 @@ public sealed class MaxwellRuntimeRunner
             startInfo.ArgumentList.Add("--workflow-root");
             startInfo.ArgumentList.Add(ResolveWorkflowRoot(workflow));
 
-            string? bundledChromeDirectory = BundledChromeLocator.FindBundledChromeDirectory();
-            if (!string.IsNullOrWhiteSpace(bundledChromeDirectory))
+            if (useBundledBrowser)
             {
-                string existingPath = startInfo.Environment.TryGetValue("PATH", out string? currentPath)
-                    ? currentPath ?? string.Empty
-                    : Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
-                startInfo.Environment["PATH"] = bundledChromeDirectory + Path.PathSeparator + existingPath;
-                startInfo.Environment["MAXWELL_BUNDLED_CHROME"] = Path.Combine(bundledChromeDirectory, "chrome.exe");
-                startInfo.Environment["MAXWELL_BROWSER_PROFILE"] = BundledChromeLocator.MaxwellBrowserProfileDirectory;
-            }
+                string? bundledChromeDirectory = BundledChromeLocator.FindBundledChromeDirectory();
+                if (!string.IsNullOrWhiteSpace(bundledChromeDirectory))
+                {
+                    string existingPath = startInfo.Environment.TryGetValue("PATH", out string? currentPath)
+                        ? currentPath ?? string.Empty
+                        : Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
+                    startInfo.Environment["PATH"] = bundledChromeDirectory + Path.PathSeparator + existingPath;
+                    startInfo.Environment["MAXWELL_BUNDLED_CHROME"] = Path.Combine(bundledChromeDirectory, "chrome.exe");
+                    startInfo.Environment["MAXWELL_BROWSER_PROFILE"] = BundledChromeLocator.MaxwellBrowserProfileDirectory;
+                }
 
-            string? bundledExtensionDirectory = BundledChromeLocator.FindBundledExtensionDirectory();
-            if (!string.IsNullOrWhiteSpace(bundledExtensionDirectory))
-            {
-                startInfo.Environment["MAXWELL_BROWSER_EXTENSION"] = bundledExtensionDirectory;
-                // Register before any workflow can launch the bundled browser.
-                // This also covers simple Utilities.StartProcess workflows that
-                // do not reference the OpenRPA.NM assembly directly.
-                new ChromeAutomationStatusService().RegisterBundledNativeHost();
+                string? bundledExtensionDirectory = BundledChromeLocator.FindBundledExtensionDirectory();
+                if (!string.IsNullOrWhiteSpace(bundledExtensionDirectory))
+                {
+                    startInfo.Environment["MAXWELL_BROWSER_EXTENSION"] = bundledExtensionDirectory;
+                    // Register before any workflow can launch the bundled browser.
+                    // This also covers simple Utilities.StartProcess workflows that
+                    // do not reference the OpenRPA.NM assembly directly.
+                    new ChromeAutomationStatusService().RegisterBundledNativeHost();
+                }
             }
 
             process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
