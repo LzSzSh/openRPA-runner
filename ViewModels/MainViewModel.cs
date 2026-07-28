@@ -22,6 +22,7 @@ public sealed class MainViewModel : ObservableObject
     private readonly ChromeAutomationStatusService _chromeAutomationStatusService = new();
     private readonly MaxwellBrowserBootstrapper _browserBootstrapper = new();
     private readonly AppSettings _settings;
+    private readonly BrowserModePolicy _browserModePolicy = BrowserModePolicy.Load();
 
     private string? _projectFolder;
     private string _currentProjectName = "未选择 Project";
@@ -50,7 +51,12 @@ public sealed class MainViewModel : ObservableObject
         _projectFolder = _settings.LastProjectFolder;
         _runHotkey = _settings.RunHotkey;
         _stopHotkey = _settings.StopHotkey;
-        _useBundledBrowser = !string.Equals(_settings.BrowserLaunchMode, "Local", StringComparison.OrdinalIgnoreCase);
+        _useBundledBrowser = _browserModePolicy.Availability switch
+        {
+            BrowserModeAvailability.BundledOnly => true,
+            BrowserModeAvailability.LocalOnly => false,
+            _ => !string.Equals(_settings.BrowserLaunchMode, "Local", StringComparison.OrdinalIgnoreCase)
+        };
 
         BrowseProjectCommand = new RelayCommand(_ => BrowseProjectFolder());
         OpenProjectFolderCommand = new RelayCommand(_ => OpenProjectFolder(), _ => !string.IsNullOrWhiteSpace(ProjectFolder) && Directory.Exists(ProjectFolder));
@@ -185,6 +191,7 @@ public sealed class MainViewModel : ObservableObject
         get => _useBundledBrowser;
         set
         {
+            if (!CanUseBundledBrowser) return;
             if (SetProperty(ref _useBundledBrowser, value))
             {
                 OnPropertyChanged(nameof(UseLocalBrowser));
@@ -199,13 +206,20 @@ public sealed class MainViewModel : ObservableObject
         get => !UseBundledBrowser;
         set
         {
-            if (value) UseBundledBrowser = false;
+            if (value && CanUseLocalBrowser) UseBundledBrowser = false;
         }
     }
 
-    public string BrowserLaunchDescription => UseBundledBrowser
-        ? "工作流中的浏览器启动将使用 Maxwell 内置 Chromium 和独立资料目录。"
-        : "工作流中的浏览器启动将使用本机安装的浏览器；请自行安装并启用所需扩展。";
+    public bool CanUseBundledBrowser => _browserModePolicy.Availability != BrowserModeAvailability.LocalOnly;
+    public bool CanUseLocalBrowser => _browserModePolicy.Availability != BrowserModeAvailability.BundledOnly;
+
+    public string BrowserLaunchDescription => _browserModePolicy.Availability switch
+    {
+        BrowserModeAvailability.BundledOnly => "此发行包只包含 Maxwell 内置 Chromium，工作流将始终使用内置浏览器和独立资料目录。",
+        BrowserModeAvailability.LocalOnly => "此精简发行包不包含内置浏览器，工作流将使用本机安装的浏览器；请自行安装并启用所需扩展。",
+        _ when UseBundledBrowser => "工作流中的浏览器启动将使用 Maxwell 内置 Chromium 和独立资料目录。",
+        _ => "工作流中的浏览器启动将使用本机安装的浏览器；请自行安装并启用所需扩展。"
+    };
 
     public string RunHotkeyText => string.IsNullOrWhiteSpace(RunHotkey) ? "未设置" : RunHotkey;
     public string StopHotkeyText => string.IsNullOrWhiteSpace(StopHotkey) ? "未设置" : StopHotkey;

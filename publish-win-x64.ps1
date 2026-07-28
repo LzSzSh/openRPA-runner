@@ -1,6 +1,6 @@
 param(
-  [ValidateSet("Slim", "Standalone")]
-  [string]$Mode = "Standalone"
+  [ValidateSet("Slim", "Standalone", "Bundled", "LocalBrowser")]
+  [string]$Mode = "Bundled"
 )
 
 $ErrorActionPreference = "Stop"
@@ -8,8 +8,14 @@ $ErrorActionPreference = "Stop"
 $projectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $projectDir
 
-$publishDir = if ($Mode -eq "Standalone") { ".\publish\Maxwell-version4" } else { ".\publish\win-x64-slim" }
-$selfContained = if ($Mode -eq "Standalone") { "true" } else { "false" }
+$publishDir = switch ($Mode) {
+  "Bundled" { ".\publish\Maxwell-version4-bundled" }
+  "LocalBrowser" { ".\publish\Maxwell-version4-local-browser" }
+  "Standalone" { ".\publish\Maxwell-version4" }
+  default { ".\publish\win-x64-slim" }
+}
+$selfContained = if ($Mode -eq "Slim") { "false" } else { "true" }
+$browserMode = if ($Mode -eq "LocalBrowser") { "LocalOnly" } elseif ($Mode -eq "Bundled") { "BundledOnly" } else { "Both" }
 $publishRoot = [System.IO.Path]::GetFullPath((Join-Path $projectDir "publish"))
 $publishFullPath = [System.IO.Path]::GetFullPath((Join-Path $projectDir $publishDir))
 if (-not $publishFullPath.StartsWith(
@@ -27,7 +33,7 @@ $properties = @(
   "-p:DebugSymbols=false"
 )
 
-if ($Mode -eq "Standalone") {
+if ($selfContained -eq "true") {
   $properties += "-p:EnableCompressionInSingleFile=true"
   $properties += "-p:IncludeNativeLibrariesForSelfExtract=true"
 }
@@ -51,6 +57,13 @@ if (Test-Path $openRpaRuntimeStaging -PathType Container) {
   Copy-Item (Join-Path $openRpaRuntimeStaging "chromemanifest.json") (Join-Path $runtimeDir "chromemanifest.template.json") -Force
   # RuntimeHost owns its executable, configuration, and JSON protocol dependency.
   Copy-Item .\Maxwell.RuntimeHost\bin\Release\net48\* $runtimeDir -Recurse -Force
+
+  if ($browserMode -eq "LocalOnly") {
+    $bundledChromePath = Join-Path $runtimeDir "chrome-portable"
+    if (Test-Path -LiteralPath $bundledChromePath -PathType Container) {
+      Remove-Item -LiteralPath $bundledChromePath -Recurse -Force
+    }
+  }
 
   # This distribution is explicitly win-x64. Keep the source staging tree
   # complete for development, but do not ship native binaries that Windows x64
@@ -91,16 +104,23 @@ $runtimeExe = Join-Path $runtimeDir "Maxwell.RuntimeHost.exe"
 $runtimeConfig = Join-Path $runtimeDir "Maxwell.RuntimeHost.exe.config"
 $runtimeJson = Join-Path $runtimeDir "Newtonsoft.Json.dll"
 $browserInstaller = Join-Path $publishDir "install-browser-automation.ps1"
+$browserModeConfig = Join-Path $publishDir "browser-mode.json"
 $browserManifestTemplate = Join-Path $runtimeDir "chromemanifest.template.json"
 $bundledBrowserExtensionManifest = Join-Path $browserExtensionDestination "manifest.json"
-$requiredFiles = @($appExe, $runtimeExe, $runtimeConfig, $runtimeJson, $browserInstaller, $browserManifestTemplate, $bundledBrowserExtensionManifest)
+@{ BrowserMode = $browserMode } | ConvertTo-Json | Set-Content -Path $browserModeConfig -Encoding UTF8
+$requiredFiles = @($appExe, $runtimeExe, $runtimeConfig, $runtimeJson, $browserInstaller, $browserManifestTemplate, $bundledBrowserExtensionManifest, $browserModeConfig)
 foreach ($requiredFile in $requiredFiles) {
   if ([string]::IsNullOrWhiteSpace($requiredFile) -or -not (Test-Path $requiredFile -PathType Leaf)) {
     throw "Missing published file: $requiredFile"
   }
 }
 
-$zipFile = if ($Mode -eq "Standalone") { ".\publish\Maxwell-version4.zip" } else { ".\publish\Maxwell-win-x64-slim.zip" }
+$zipFile = switch ($Mode) {
+  "Bundled" { ".\publish\Maxwell-version4-bundled.zip" }
+  "LocalBrowser" { ".\publish\Maxwell-version4-local-browser.zip" }
+  "Standalone" { ".\publish\Maxwell-version4.zip" }
+  default { ".\publish\Maxwell-win-x64-slim.zip" }
+}
 Compress-Archive -Path (Join-Path $publishDir "*") -DestinationPath $zipFile -Force
 
 Write-Host ""

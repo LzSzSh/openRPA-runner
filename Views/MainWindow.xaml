@@ -603,10 +603,12 @@
                         <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
                             <RadioButton Content="使用 Maxwell 内置浏览器"
                                          IsChecked="{Binding UseBundledBrowser, Mode=TwoWay}"
+                                         IsEnabled="{Binding CanUseBundledBrowser}"
                                          GroupName="BrowserLaunchMode"
                                          Margin="0,0,24,0" />
                             <RadioButton Content="使用本机浏览器"
                                          IsChecked="{Binding UseLocalBrowser, Mode=TwoWay}"
+                                         IsEnabled="{Binding CanUseLocalBrowser}"
                                          GroupName="BrowserLaunchMode" />
                         </StackPanel>
                         <TextBlock Text="{Binding BrowserLaunchDescription}"
