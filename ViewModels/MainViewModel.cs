@@ -19,8 +19,6 @@ public sealed class MainViewModel : ObservableObject
     private readonly LocalWorkflowImportService _workflowImportService = new();
     private readonly LocalProjectImportService _projectImportService = new();
     private readonly MaxwellRuntimeRunner _runtimeRunner = new();
-    private readonly ChromeAutomationStatusService _chromeAutomationStatusService = new();
-    private readonly MaxwellBrowserBootstrapper _browserBootstrapper = new();
     private readonly AppSettings _settings;
     private readonly BrowserModePolicy _browserModePolicy = BrowserModePolicy.Load();
 
@@ -41,8 +39,6 @@ public sealed class MainViewModel : ObservableObject
     private bool _isRecentExpanded;
     private bool _isRecentSearchVisible;
     private bool _isRecentHeaderSelected;
-    private ChromeAutomationStatus _chromeAutomationStatus = new();
-    private string? _chromeAutomationMessage;
     private bool _useBundledBrowser;
 
     public MainViewModel()
@@ -51,12 +47,7 @@ public sealed class MainViewModel : ObservableObject
         _projectFolder = _settings.LastProjectFolder;
         _runHotkey = _settings.RunHotkey;
         _stopHotkey = _settings.StopHotkey;
-        _useBundledBrowser = _browserModePolicy.Availability switch
-        {
-            BrowserModeAvailability.BundledOnly => true,
-            BrowserModeAvailability.LocalOnly => false,
-            _ => !string.Equals(_settings.BrowserLaunchMode, "Local", StringComparison.OrdinalIgnoreCase)
-        };
+        _useBundledBrowser = _browserModePolicy.Availability != BrowserModeAvailability.LocalOnly;
 
         BrowseProjectCommand = new RelayCommand(_ => BrowseProjectFolder());
         OpenProjectFolderCommand = new RelayCommand(_ => OpenProjectFolder(), _ => !string.IsNullOrWhiteSpace(ProjectFolder) && Directory.Exists(ProjectFolder));
@@ -69,9 +60,6 @@ public sealed class MainViewModel : ObservableObject
         ShowAddProjectCommand = new RelayCommand(_ => ShowAddProject());
         ShowRecentProjectsCommand = new RelayCommand(_ => ShowRecentProjects());
         ShowSettingsCommand = new RelayCommand(_ => ShowSettings());
-        RefreshChromeAutomationCommand = new RelayCommand(_ => RefreshChromeAutomationStatus());
-        RepairChromeNativeHostCommand = new RelayCommand(_ => RepairChromeNativeHost());
-        OpenChromeExtensionStoreCommand = new RelayCommand(_ => OpenChromeExtensionStore());
         ClearRunHotkeyCommand = new RelayCommand(_ => SetRunHotkey(null));
         ClearStopHotkeyCommand = new RelayCommand(_ => SetStopHotkey(null));
         SelectRecentProjectCommand = new RelayCommand(SelectRecentProject);
@@ -81,7 +69,6 @@ public sealed class MainViewModel : ObservableObject
         RecentProjectView = CollectionViewSource.GetDefaultView(RecentProjects);
         RecentProjectView.Filter = FilterRecentProject;
         SynchronizeRecentProjects();
-        RefreshChromeAutomationStatus();
         LoadWorkflows();
     }
 
@@ -173,53 +160,6 @@ public sealed class MainViewModel : ObservableObject
     public bool IsAddProjectSelected => ActiveView == "AddProject";
     public bool IsRecentProjectsSelected => _isRecentHeaderSelected;
     public bool IsSettingsSelected => ActiveView == "Settings";
-
-    public ChromeAutomationStatus ChromeAutomationStatus
-    {
-        get => _chromeAutomationStatus;
-        private set => SetProperty(ref _chromeAutomationStatus, value);
-    }
-
-    public string? ChromeAutomationMessage
-    {
-        get => _chromeAutomationMessage;
-        private set => SetProperty(ref _chromeAutomationMessage, value);
-    }
-
-    public bool UseBundledBrowser
-    {
-        get => _useBundledBrowser;
-        set
-        {
-            if (!CanUseBundledBrowser) return;
-            if (SetProperty(ref _useBundledBrowser, value))
-            {
-                OnPropertyChanged(nameof(UseLocalBrowser));
-                OnPropertyChanged(nameof(BrowserLaunchDescription));
-                SaveSettings();
-            }
-        }
-    }
-
-    public bool UseLocalBrowser
-    {
-        get => !UseBundledBrowser;
-        set
-        {
-            if (value && CanUseLocalBrowser) UseBundledBrowser = false;
-        }
-    }
-
-    public bool CanUseBundledBrowser => _browserModePolicy.Availability != BrowserModeAvailability.LocalOnly;
-    public bool CanUseLocalBrowser => _browserModePolicy.Availability != BrowserModeAvailability.BundledOnly;
-
-    public string BrowserLaunchDescription => _browserModePolicy.Availability switch
-    {
-        BrowserModeAvailability.BundledOnly => "此发行包只包含 Maxwell 内置 Chromium，工作流将始终使用内置浏览器和独立资料目录。",
-        BrowserModeAvailability.LocalOnly => "此精简发行包不包含内置浏览器，工作流将使用本机安装的浏览器；请自行安装并启用所需扩展。",
-        _ when UseBundledBrowser => "工作流中的浏览器启动将使用 Maxwell 内置 Chromium 和独立资料目录。",
-        _ => "工作流中的浏览器启动将使用本机安装的浏览器；请自行安装并启用所需扩展。"
-    };
 
     public string RunHotkeyText => string.IsNullOrWhiteSpace(RunHotkey) ? "未设置" : RunHotkey;
     public string StopHotkeyText => string.IsNullOrWhiteSpace(StopHotkey) ? "未设置" : StopHotkey;
@@ -334,9 +274,6 @@ public sealed class MainViewModel : ObservableObject
     public RelayCommand ClearStopHotkeyCommand { get; }
     public RelayCommand SelectRecentProjectCommand { get; }
     public RelayCommand ToggleRecentProjectSearchCommand { get; }
-    public RelayCommand RefreshChromeAutomationCommand { get; }
-    public RelayCommand RepairChromeNativeHostCommand { get; }
-    public RelayCommand OpenChromeExtensionStoreCommand { get; }
 
     public bool TrySetHotkey(string target, string key)
     {
@@ -588,7 +525,7 @@ public sealed class MainViewModel : ObservableObject
 
         try
         {
-            MaxwellRuntimeRunResult runResult = await _runtimeRunner.RunAsync(workflow, UseBundledBrowser);
+            MaxwellRuntimeRunResult runResult = await _runtimeRunner.RunAsync(workflow, _useBundledBrowser);
             if (_stopRequested)
             {
                 workflow.LastRunStatus = "已停止";
@@ -762,75 +699,10 @@ public sealed class MainViewModel : ObservableObject
             return;
         }
 
-        RefreshChromeAutomationStatus();
         ActiveView = "Settings";
         IsRecentExpanded = false;
         SetRecentHeaderSelected(false);
         ClearRecentProjectSelection();
-    }
-
-    private void RefreshChromeAutomationStatus()
-    {
-        try
-        {
-            ChromeAutomationStatus = _chromeAutomationStatusService.Inspect();
-            ChromeAutomationMessage = null;
-        }
-        catch (Exception ex)
-        {
-            ChromeAutomationMessage = "Chrome 状态检查失败：" + ex.Message;
-        }
-    }
-
-    private void RepairChromeNativeHost()
-    {
-        try
-        {
-            _chromeAutomationStatusService.RegisterBundledNativeHost();
-            RefreshChromeAutomationStatus();
-            ChromeAutomationMessage = "Native Messaging Host 已注册。请完全退出并重新打开 Chrome，再点击“重新检查”。";
-        }
-        catch (Exception ex)
-        {
-            ChromeAutomationMessage = "修复 Native Messaging Host 失败：" + ex.Message;
-        }
-    }
-
-    private void OpenChromeExtensionStore()
-    {
-        try
-        {
-            if (UseBundledBrowser && !string.IsNullOrWhiteSpace(BundledChromeLocator.FindBundledExtensionDirectory()))
-            {
-                _browserBootstrapper.LaunchExtensionManagementPage();
-                ChromeAutomationMessage = "已启动 Maxwell 内置浏览器，并在独立资料目录中加载了包内 OpenRPA 浏览器扩展。请在扩展页确认该扩展已启用。";
-                return;
-            }
-
-            const string extensionSearchUrl = "https://chromewebstore.google.com/search/OpenRPA";
-            string? bundledChrome = BundledChromeLocator.FindBundledChromeExecutable();
-            if (!string.IsNullOrWhiteSpace(bundledChrome) && File.Exists(bundledChrome))
-            {
-                Process.Start(new ProcessStartInfo
-                {
-                    FileName = bundledChrome,
-                    Arguments = extensionSearchUrl,
-                    UseShellExecute = false,
-                    WorkingDirectory = Path.GetDirectoryName(bundledChrome)
-                });
-                ChromeAutomationMessage = "已通过内置 Chrome 打开 OpenRPA 扩展搜索页。安装并启用扩展后，请完全退出并重新打开该内置浏览器。";
-                return;
-            }
-
-            Process.Start(new ProcessStartInfo(extensionSearchUrl) { UseShellExecute = true });
-            ChromeAutomationMessage = UseBundledBrowser
-                ? "已打开 Chrome 网上应用店的 OpenRPA 搜索页。安装并启用扩展后，请完全退出并重新打开 Chrome。"
-                : "已用本机默认浏览器打开 OpenRPA 扩展搜索页。安装并启用扩展后，请完全退出并重新打开该浏览器。";
-        }
-        catch (Exception ex)
-        {
-            ChromeAutomationMessage = "无法打开 Chrome 扩展页：" + ex.Message;
-        }
     }
 
     private void SelectRecentProject(object? parameter)
@@ -1047,7 +919,6 @@ public sealed class MainViewModel : ObservableObject
         _settings.LastProjectFolder = ProjectFolder;
         _settings.RunHotkey = RunHotkey;
         _settings.StopHotkey = StopHotkey;
-        _settings.BrowserLaunchMode = UseBundledBrowser ? "Bundled" : "Local";
         _settingsService.Save(_settings);
     }
 
