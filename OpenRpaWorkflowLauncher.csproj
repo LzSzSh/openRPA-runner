@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <ApplicationIcon />
+    <AssemblyName>Maxwell麦威数字员工</AssemblyName>
+    <Product>Maxwell麦威数字员工</Product>
+    <Title>Maxwell麦威数字员工</Title>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <RootNamespace>OpenRpaWorkflowLauncher</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Ignore stale generated files if an older checkout built the removed legacy projects. -->
+    <Compile Remove="OpenRpaImportHelper\**\*.cs" />
+    <Compile Remove="OpenRpaOfficialBridge\**\*.cs" />
+    <Compile Remove="Maxwell.RuntimeHost\**\*.cs" />
+    <EmbeddedResource Remove="Maxwell.RuntimeHost\**\*" />
+    <None Remove="Maxwell.RuntimeHost\**\*" />
+    <Page Remove="Maxwell.RuntimeHost\**\*" />
+    <Compile Remove="run-test\**\*.cs" />
+    <EmbeddedResource Remove="run-test\**\*" />
+    <None Remove="run-test\**\*" />
+    <Page Remove="run-test\**\*" />
+    <Compile Remove="build-verify\**\*.cs" />
+    <EmbeddedResource Remove="build-verify\**\*" />
+    <None Remove="build-verify\**\*" />
+    <Page Remove="build-verify\**\*" />
+  </ItemGroup>
+</Project>

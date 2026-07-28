@@ -1,0 +1,28 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OpenRpaWorkflowLauncher", "OpenRpaWorkflowLauncher.csproj", "{18F6F6C0-D8B8-4D53-8A7F-9350696A4F7E}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Maxwell.RuntimeHost", "Maxwell.RuntimeHost\Maxwell.RuntimeHost.csproj", "{A4E6E50D-4482-41C5-9DAA-CF10B5AE2B56}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{18F6F6C0-D8B8-4D53-8A7F-9350696A4F7E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{18F6F6C0-D8B8-4D53-8A7F-9350696A4F7E}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{18F6F6C0-D8B8-4D53-8A7F-9350696A4F7E}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{18F6F6C0-D8B8-4D53-8A7F-9350696A4F7E}.Release|Any CPU.Build.0 = Release|Any CPU
+		{A4E6E50D-4482-41C5-9DAA-CF10B5AE2B56}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A4E6E50D-4482-41C5-9DAA-CF10B5AE2B56}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A4E6E50D-4482-41C5-9DAA-CF10B5AE2B56}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A4E6E50D-4482-41C5-9DAA-CF10B5AE2B56}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal

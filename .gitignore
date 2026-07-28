@@ -1,0 +1,33 @@
+# Build output
+bin/
+obj/
+publish/
+runtime-staging/
+build-verify/
+
+# Visual Studio / Rider / VS Code local files
+.vs/
+.idea/
+.vscode/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# .NET generated files
+.dotnet/
+TestResults/
+*.nupkg
+*.snupkg
+
+# Local route validation fixtures. These may contain real workflow content.
+run-test/
+
+# Logs and local runtime data
+*.log
+crash.log
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
