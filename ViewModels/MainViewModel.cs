@@ -1,23 +1,17 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
-using System.Diagnostics;
 using System.IO;
 using System.Windows;
 using System.Windows.Data;
-using Microsoft.Win32;
 using OpenRpaWorkflowLauncher.Models;
 using OpenRpaWorkflowLauncher.Services;
-using WinForms = System.Windows.Forms;
 
 namespace OpenRpaWorkflowLauncher.ViewModels;
 
 public sealed class MainViewModel : ObservableObject
 {
-    private const int MaxStoredRecentProjects = 100;
     private readonly AppSettingsService _settingsService = new();
     private readonly WorkflowScanner _workflowScanner = new();
-    private readonly LocalWorkflowImportService _workflowImportService = new();
-    private readonly LocalProjectImportService _projectImportService = new();
     private readonly MaxwellRuntimeRunner _runtimeRunner = new();
     private readonly CompanyDeploymentSettingsService _companyDeploymentSettingsService = new();
     private readonly AppSettings _settings;
@@ -36,7 +30,6 @@ public sealed class MainViewModel : ObservableObject
     private string? _stopHotkey;
     private string? _hotkeyError;
     private bool _isRunning;
-    private bool _isImporting;
     private bool _stopRequested;
     private WorkflowItem? _activeWorkflow;
     private bool _isRecentExpanded;
@@ -47,24 +40,19 @@ public sealed class MainViewModel : ObservableObject
     public MainViewModel()
     {
         _settings = _settingsService.Load();
-        _projectFolder = _settings.LastProjectFolder;
-        _sharedLibraryFolder = _companyDeploymentSettingsService.LoadSharedLibraryFolder()
-            ?? _settings.SharedLibraryFolder;
+        _sharedLibraryFolder = _settings.SharedLibraryFolder
+            ?? _companyDeploymentSettingsService.LoadSharedLibraryFolder();
         _runHotkey = _settings.RunHotkey;
         _stopHotkey = _settings.StopHotkey;
         _useBundledBrowser = _browserModePolicy.Availability != BrowserModeAvailability.LocalOnly;
 
-        BrowseProjectCommand = new RelayCommand(_ => BrowseProjectFolder());
         BrowseSharedLibraryCommand = new RelayCommand(_ => BrowseSharedLibraryFolder());
         SyncSharedLibraryCommand = new AsyncRelayCommand(RefreshSharedLibraryAsync, _ => !IsRunning && !string.IsNullOrWhiteSpace(SharedLibraryFolder));
-        OpenProjectFolderCommand = new RelayCommand(_ => OpenProjectFolder(), _ => !string.IsNullOrWhiteSpace(ProjectFolder) && Directory.Exists(ProjectFolder));
-        RefreshCommand = new RelayCommand(_ => LoadWorkflows(), _ => !IsRunning && !IsImporting);
-        ImportWorkflowCommand = new AsyncRelayCommand(_ => BrowseAndImportAsync(), _ => !IsRunning && !IsImporting);
-        RunFirstWorkflowCommand = new AsyncRelayCommand(RunFirstWorkflowAsync, _ => !IsRunning && !IsImporting && Workflows.Count > 0);
-        RunWorkflowCommand = new AsyncRelayCommand(RunWorkflowAsync, parameter => !IsRunning && !IsImporting && parameter is WorkflowItem workflow && workflow.CanRun);
+        RefreshCommand = new RelayCommand(_ => LoadWorkflows(), _ => !IsRunning);
+        RunFirstWorkflowCommand = new AsyncRelayCommand(RunFirstWorkflowAsync, _ => !IsRunning && Workflows.Count > 0);
+        RunWorkflowCommand = new AsyncRelayCommand(RunWorkflowAsync, parameter => !IsRunning && parameter is WorkflowItem workflow && workflow.CanRun);
         StopWorkflowCommand = new AsyncRelayCommand(StopWorkflowAsync, _ => IsRunning);
         ClearLogsCommand = new RelayCommand(_ => Logs.Clear());
-        ShowAddProjectCommand = new RelayCommand(_ => ShowAddProject());
         ShowRecentProjectsCommand = new RelayCommand(_ => ShowRecentProjects());
         ShowSettingsCommand = new RelayCommand(_ => ShowSettings());
         ClearRunHotkeyCommand = new RelayCommand(_ => SetRunHotkey(null));
@@ -89,14 +77,7 @@ public sealed class MainViewModel : ObservableObject
     public string? ProjectFolder
     {
         get => _projectFolder;
-        set
-        {
-            if (SetProperty(ref _projectFolder, value))
-            {
-                SaveSettings();
-                OpenProjectFolderCommand.RaiseCanExecuteChanged();
-            }
-        }
+        set => SetProperty(ref _projectFolder, value);
     }
 
     public string? SharedLibraryFolder
@@ -106,6 +87,10 @@ public sealed class MainViewModel : ObservableObject
         {
             if (SetProperty(ref _sharedLibraryFolder, value))
             {
+                // The sidebar represents the configured shared library, not a
+                // cross-library history. A changed root must never keep projects
+                // from the previous network path visible or selected.
+                ClearProjectsForSharedLibraryChange();
                 SharedLibraryStatus = string.IsNullOrWhiteSpace(value)
                     ? "未配置共享工作流目录"
                     : "路径已保存；点击“立即刷新”读取共享项目。";
@@ -172,10 +157,8 @@ public sealed class MainViewModel : ObservableObject
             if (SetProperty(ref _activeView, value))
             {
                 OnPropertyChanged(nameof(IsHomeVisible));
-                OnPropertyChanged(nameof(IsAddProjectVisible));
                 OnPropertyChanged(nameof(IsWorkflowVisible));
                 OnPropertyChanged(nameof(IsSettingsVisible));
-                OnPropertyChanged(nameof(IsAddProjectSelected));
                 OnPropertyChanged(nameof(IsRecentProjectsSelected));
                 OnPropertyChanged(nameof(IsSettingsSelected));
             }
@@ -183,10 +166,8 @@ public sealed class MainViewModel : ObservableObject
     }
 
     public Visibility IsHomeVisible => ActiveView == "Home" ? Visibility.Visible : Visibility.Collapsed;
-    public Visibility IsAddProjectVisible => ActiveView == "AddProject" ? Visibility.Visible : Visibility.Collapsed;
     public Visibility IsWorkflowVisible => ActiveView == "Workflow" ? Visibility.Visible : Visibility.Collapsed;
     public Visibility IsSettingsVisible => ActiveView == "Settings" ? Visibility.Visible : Visibility.Collapsed;
-    public bool IsAddProjectSelected => ActiveView == "AddProject";
     public bool IsRecentProjectsSelected => _isRecentHeaderSelected;
     public bool IsSettingsSelected => ActiveView == "Settings";
 
@@ -269,37 +250,17 @@ public sealed class MainViewModel : ObservableObject
                 RunWorkflowCommand.RaiseCanExecuteChanged();
                 SyncSharedLibraryCommand.RaiseCanExecuteChanged();
                 StopWorkflowCommand.RaiseCanExecuteChanged();
-                ImportWorkflowCommand.RaiseCanExecuteChanged();
             }
         }
     }
 
-    public bool IsImporting
-    {
-        get => _isImporting;
-        private set
-        {
-            if (SetProperty(ref _isImporting, value))
-            {
-                RefreshCommand.RaiseCanExecuteChanged();
-                ImportWorkflowCommand.RaiseCanExecuteChanged();
-                RunFirstWorkflowCommand.RaiseCanExecuteChanged();
-                RunWorkflowCommand.RaiseCanExecuteChanged();
-            }
-        }
-    }
-
-    public RelayCommand BrowseProjectCommand { get; }
     public RelayCommand BrowseSharedLibraryCommand { get; }
     public AsyncRelayCommand SyncSharedLibraryCommand { get; }
-    public RelayCommand OpenProjectFolderCommand { get; }
     public RelayCommand RefreshCommand { get; }
-    public AsyncRelayCommand ImportWorkflowCommand { get; }
     public AsyncRelayCommand RunFirstWorkflowCommand { get; }
     public AsyncRelayCommand RunWorkflowCommand { get; }
     public AsyncRelayCommand StopWorkflowCommand { get; }
     public RelayCommand ClearLogsCommand { get; }
-    public RelayCommand ShowAddProjectCommand { get; }
     public RelayCommand ShowRecentProjectsCommand { get; }
     public RelayCommand ShowSettingsCommand { get; }
     public RelayCommand ClearRunHotkeyCommand { get; }
@@ -342,169 +303,19 @@ public sealed class MainViewModel : ObservableObject
         }
     }
 
-    public async Task ImportJsonFilesAsync(IEnumerable<string> paths)
+    private void BrowseSharedLibraryFolder()
     {
-        if (string.IsNullOrWhiteSpace(ProjectFolder))
+        Microsoft.Win32.OpenFolderDialog dialog = new()
         {
-            SetStatus("请先选择本地项目文件夹。", "Warning");
-            AddLog("导入失败：未选择本地项目文件夹。");
-            return;
-        }
-
-        Directory.CreateDirectory(ProjectFolder);
-        List<string> importFiles = [];
-        foreach (string path in paths)
-        {
-            if (Directory.Exists(path))
-            {
-                ProjectFolder = path;
-                LoadWorkflows();
-                return;
-            }
-
-            if (File.Exists(path) &&
-                (string.Equals(Path.GetExtension(path), ".json", StringComparison.OrdinalIgnoreCase) ||
-                 string.Equals(Path.GetExtension(path), ".rpaproj", StringComparison.OrdinalIgnoreCase)))
-            {
-                importFiles.Add(path);
-            }
-        }
-
-        if (importFiles.Count == 0)
-        {
-            SetStatus("没有找到可导入的 workflow JSON 或 .rpaproj 文件。", "Warning");
-            AddLog("导入失败：未识别到 workflow JSON 或 .rpaproj 文件。");
-            return;
-        }
-
-        IsImporting = true;
-        int importedWorkflows = 0;
-        int importedProjects = 0;
-        List<string> failures = [];
-        try
-        {
-            foreach (string importFile in importFiles)
-            {
-                SetStatus($"正在导入：{Path.GetFileName(importFile)}", "Running");
-                try
-                {
-                    if (string.Equals(Path.GetExtension(importFile), ".rpaproj", StringComparison.OrdinalIgnoreCase))
-                    {
-                        LocalProjectImportResult response = await Task.Run(() =>
-                            _projectImportService.Import(importFile, ProjectFolder!));
-                        importedProjects++;
-                        importedWorkflows += response.WorkflowCount;
-                        AddLog($"已导入 OpenRPA Project：{response.ProjectName}，workflow {response.WorkflowCount} 个，依赖 {response.DependencyCount} 个 -> {response.TargetDirectory}");
-                    }
-                    else
-                    {
-                        LocalWorkflowImportResult response = await Task.Run(() =>
-                            _workflowImportService.Import(importFile, ProjectFolder!));
-                        importedWorkflows++;
-                        AddLog($"已导入本地 workflow：{response.ProjectName}/{response.WorkflowName} -> {response.TargetPath}");
-                    }
-                }
-                catch (Exception ex)
-                {
-                    failures.Add($"{Path.GetFileName(importFile)}：{ex.Message}");
-                    AddLog($"导入失败：{Path.GetFileName(importFile)}，{ex.Message}");
-                }
-            }
-        }
-        finally
-        {
-            IsImporting = false;
-        }
-
-        LoadWorkflows();
-        ActiveView = "Workflow";
-        if (failures.Count == 0)
-        {
-            string summary = importedProjects > 0
-                ? $"已导入 {importedProjects} 个 Project、{importedWorkflows} 个 workflow。"
-                : $"已导入 {importedWorkflows} 个 workflow。";
-            SetStatus(summary, "Success");
-            return;
-        }
-
-        foreach (string failure in failures)
-        {
-            Warnings.Add(failure);
-        }
-
-        SetStatus(importedWorkflows > 0 || importedProjects > 0
-            ? $"已导入 {importedProjects} 个 Project、{importedWorkflows} 个 workflow，另有 {failures.Count} 个失败。"
-            : "导入失败。", "Warning");
-        System.Windows.MessageBox.Show(string.Join(Environment.NewLine, failures), "导入失败", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Warning);
-    }
-
-    public Task ImportJsonFromClipboardTextAsync(string text)
-    {
-        string[] paths = text
-            .Split([Environment.NewLine, "\r", "\n"], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        return ImportJsonFilesAsync(paths);
-    }
-
-    private async Task BrowseAndImportAsync()
-    {
-        Microsoft.Win32.OpenFileDialog dialog = new()
-        {
-            Title = "选择 OpenRPA workflow JSON 或 Project",
-            Filter = "OpenRPA 文件 (*.json;*.rpaproj)|*.json;*.rpaproj|Workflow JSON (*.json)|*.json|OpenRPA Project (*.rpaproj)|*.rpaproj|所有文件 (*.*)|*.*",
-            CheckFileExists = true,
-            Multiselect = true
+            Title = "选择网络共享工作流库的根目录",
+            InitialDirectory = Directory.Exists(SharedLibraryFolder) ? SharedLibraryFolder : string.Empty,
+            Multiselect = false
         };
 
         if (dialog.ShowDialog() == true)
         {
-            await ImportJsonFilesAsync(dialog.FileNames);
+            SharedLibraryFolder = dialog.FolderName;
         }
-    }
-
-    private void BrowseProjectFolder()
-    {
-        using WinForms.FolderBrowserDialog dialog = new()
-        {
-            Description = "选择 Maxwell 本地项目文件夹",
-            UseDescriptionForTitle = true,
-            SelectedPath = Directory.Exists(ProjectFolder) ? ProjectFolder : string.Empty
-        };
-
-        if (dialog.ShowDialog() == WinForms.DialogResult.OK)
-        {
-            ProjectFolder = dialog.SelectedPath;
-            LoadWorkflows();
-        }
-    }
-
-    private void BrowseSharedLibraryFolder()
-    {
-        using WinForms.FolderBrowserDialog dialog = new()
-        {
-            Description = "选择网络共享工作流库的根目录",
-            UseDescriptionForTitle = true,
-            SelectedPath = Directory.Exists(SharedLibraryFolder) ? SharedLibraryFolder : string.Empty
-        };
-
-        if (dialog.ShowDialog() == WinForms.DialogResult.OK)
-        {
-            SharedLibraryFolder = dialog.SelectedPath;
-        }
-    }
-
-    private void OpenProjectFolder()
-    {
-        if (string.IsNullOrWhiteSpace(ProjectFolder) || !Directory.Exists(ProjectFolder))
-        {
-            SetStatus("本地项目文件夹不存在。", "Warning");
-            return;
-        }
-
-        Process.Start(new ProcessStartInfo
-        {
-            FileName = ProjectFolder,
-            UseShellExecute = true
-        });
     }
 
     private int LoadWorkflows(bool activateWorkflowView = true)
@@ -530,12 +341,11 @@ public sealed class MainViewModel : ObservableObject
         RunFirstWorkflowCommand.RaiseCanExecuteChanged();
 
         CurrentProjectName = Workflows.Count == 0 && string.IsNullOrWhiteSpace(ProjectFolder)
-            ? "未选择本地项目"
+            ? "未选择项目"
             : GetProjectFolderDisplayName();
 
         SetStatus($"空闲，已加载 {Workflows.Count} 个 workflow", Workflows.Count > 0 ? "Idle" : "Warning");
         AddLog($"刷新完成：{ProjectFolder}，当前显示 {Workflows.Count} 个 workflow，警告 {Warnings.Count} 条。");
-        AddRecentProject();
         if (Workflows.Count > 0 && activateWorkflowView)
         {
             ActiveView = "Workflow";
@@ -602,7 +412,6 @@ public sealed class MainViewModel : ObservableObject
         IsRunning = true;
         _stopRequested = false;
         _activeWorkflow = workflow;
-        PromoteRecentProject();
         workflow.IsExecuting = true;
         workflow.LastRunStatus = "执行中";
         SetStatus($"执行中：{workflow.WorkflowName}", "Running");
@@ -717,23 +526,6 @@ public sealed class MainViewModel : ObservableObject
                 System.Windows.MessageBoxButton.OK,
                 System.Windows.MessageBoxImage.Error);
         }
-    }
-
-    private void ShowAddProject()
-    {
-        if (ActiveView == "AddProject")
-        {
-            ActiveView = "Home";
-            IsRecentExpanded = false;
-            SetRecentHeaderSelected(false);
-            ClearRecentProjectSelection();
-            return;
-        }
-
-        ActiveView = "AddProject";
-        IsRecentExpanded = false;
-        SetRecentHeaderSelected(false);
-        ClearRecentProjectSelection();
     }
 
     private void ShowRecentProjects()
@@ -866,11 +658,9 @@ public sealed class MainViewModel : ObservableObject
     private void LoadRecentProjects()
     {
         RecentProjects.Clear();
-        HashSet<string> knownPaths = new(StringComparer.OrdinalIgnoreCase);
 
         foreach (string sharedProjectPath in GetSharedProjectPaths())
         {
-            knownPaths.Add(sharedProjectPath);
             RecentProjects.Add(new RecentProjectItem
             {
                 Name = GetFolderDisplayName(sharedProjectPath),
@@ -880,77 +670,21 @@ public sealed class MainViewModel : ObservableObject
                     && ActiveView == "Workflow"
             });
         }
-
-        foreach (RecentProjectInfo item in _settings.RecentProjects.Where(item => Directory.Exists(item.Path) && knownPaths.Add(item.Path)))
-        {
-            RecentProjects.Add(new RecentProjectItem
-            {
-                Name = GetFolderDisplayName(item.Path),
-                Path = item.Path,
-                IsSharedProject = false,
-                IsSelected = string.Equals(item.Path, ProjectFolder, StringComparison.OrdinalIgnoreCase)
-                    && ActiveView == "Workflow"
-            });
-        }
     }
 
     private void SynchronizeRecentProjects()
     {
-        List<RecentProjectInfo> synchronized = [];
-        HashSet<string> knownPaths = new(StringComparer.OrdinalIgnoreCase);
-
-        foreach (RecentProjectInfo item in _settings.RecentProjects)
-        {
-            if (string.IsNullOrWhiteSpace(item.Path) || !Directory.Exists(item.Path) || !knownPaths.Add(item.Path))
-            {
-                continue;
-            }
-
-            synchronized.Add(new RecentProjectInfo
-            {
-                Name = GetFolderDisplayName(item.Path),
-                Path = item.Path
-            });
-        }
-
-        bool recentProjectsChanged = !RecentProjectsMatch(_settings.RecentProjects, synchronized);
-        if (recentProjectsChanged)
-        {
-            _settings.RecentProjects = synchronized;
-        }
-
-        bool currentProjectDeleted = !string.IsNullOrWhiteSpace(ProjectFolder) && !Directory.Exists(ProjectFolder);
-        if (currentProjectDeleted)
+        List<string> sharedProjectPaths = GetSharedProjectPaths().ToList();
+        bool currentProjectUnavailable = !string.IsNullOrWhiteSpace(ProjectFolder) &&
+            !sharedProjectPaths.Any(path => string.Equals(path, ProjectFolder, StringComparison.OrdinalIgnoreCase));
+        if (currentProjectUnavailable)
         {
             ProjectFolder = null;
-            CurrentProjectName = "未选择本地项目";
-            AddLog("当前项目文件夹已被删除，已从项目列表中移除。");
-        }
-        else if (recentProjectsChanged)
-        {
-            SaveSettings();
+            CurrentProjectName = "未选择项目";
+            AddLog("当前项目不在已配置的共享工作流目录中，已从项目列表中移除。");
         }
 
         LoadRecentProjects();
-    }
-
-    private static bool RecentProjectsMatch(IReadOnlyList<RecentProjectInfo> left, IReadOnlyList<RecentProjectInfo> right)
-    {
-        if (left.Count != right.Count)
-        {
-            return false;
-        }
-
-        for (int index = 0; index < left.Count; index++)
-        {
-            if (!string.Equals(left[index].Path, right[index].Path, StringComparison.OrdinalIgnoreCase) ||
-                !string.Equals(left[index].Name, right[index].Name, StringComparison.Ordinal))
-            {
-                return false;
-            }
-        }
-
-        return true;
     }
 
     private void SetRecentHeaderSelected(bool value)
@@ -980,52 +714,22 @@ public sealed class MainViewModel : ObservableObject
         }
     }
 
-    private void AddRecentProject()
+    private void ClearProjectsForSharedLibraryChange()
     {
-        UpdateRecentProject(moveToTop: false);
-    }
-
-    private void PromoteRecentProject()
-    {
-        UpdateRecentProject(moveToTop: true);
-    }
-
-    private void UpdateRecentProject(bool moveToTop)
-    {
-        if (string.IsNullOrWhiteSpace(ProjectFolder) || !Directory.Exists(ProjectFolder))
-        {
-            return;
-        }
-
-        // Shared projects are discovered from the configured root every time;
-        // do not persist them as user-specific manual history entries.
-        if (IsSharedProjectPath(ProjectFolder))
-        {
-            LoadRecentProjects();
-            return;
-        }
-
-        string name = GetProjectFolderDisplayName();
-        RecentProjectInfo? existing = _settings.RecentProjects.FirstOrDefault(item =>
-            string.Equals(item.Path, ProjectFolder, StringComparison.OrdinalIgnoreCase));
-
-        if (existing is not null && !moveToTop)
-        {
-            return;
-        }
-
-        List<RecentProjectInfo> recent = _settings.RecentProjects
-            .Where(item => !string.Equals(item.Path, ProjectFolder, StringComparison.OrdinalIgnoreCase))
-            .ToList();
-        recent.Insert(0, new RecentProjectInfo { Name = name, Path = ProjectFolder });
-        _settings.RecentProjects = recent.Take(MaxStoredRecentProjects).ToList();
-        SaveSettings();
-        LoadRecentProjects();
+        Workflows.Clear();
+        Warnings.Clear();
+        RecentProjects.Clear();
+        ProjectFolder = null;
+        CurrentProjectName = "未选择项目";
+        SearchText = null;
+        OnPropertyChanged(nameof(WorkflowCount));
+        OnPropertyChanged(nameof(VisibleWorkflowCount));
+        RunFirstWorkflowCommand.RaiseCanExecuteChanged();
+        ClearRecentProjectSelection();
     }
 
     private void SaveSettings()
     {
-        _settings.LastProjectFolder = ProjectFolder;
         _settings.SharedLibraryFolder = SharedLibraryFolder;
         _settings.RunHotkey = RunHotkey;
         _settings.StopHotkey = StopHotkey;
@@ -1106,9 +810,4 @@ public sealed class MainViewModel : ObservableObject
         }
     }
 
-    private bool IsSharedProjectPath(string path)
-    {
-        return GetSharedProjectPaths().Any(sharedPath =>
-            string.Equals(sharedPath, path, StringComparison.OrdinalIgnoreCase));
-    }
 }

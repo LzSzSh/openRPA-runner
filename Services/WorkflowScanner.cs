@@ -27,7 +27,7 @@ public sealed class WorkflowScanner
             TryReadWorkflow(jsonFile, result);
         }
 
-        LocalWorkflowRegistry registry = LocalWorkflowRegistry.Create(projectFolder);
+        WorkflowRegistry registry = WorkflowRegistry.Create(projectFolder);
         foreach (string warning in registry.Warnings)
         {
             result.Warnings.Add(warning);
@@ -38,7 +38,7 @@ public sealed class WorkflowScanner
 
     private static void ValidateChildWorkflowReferences(
         WorkflowScanResult result,
-        LocalWorkflowRegistry registry)
+        WorkflowRegistry registry)
     {
         foreach (WorkflowItem workflow in result.Workflows)
         {

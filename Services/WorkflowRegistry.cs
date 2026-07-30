@@ -4,43 +4,42 @@ using System.Text.Json;
 namespace OpenRpaWorkflowLauncher.Services;
 
 /// <summary>
-/// Read-only index for workflows stored in Maxwell local project directories.
-/// It deliberately does not execute child workflows; RuntimeHost integration is
-/// added only after reference resolution has been verified against real exports.
+/// Read-only index for workflows stored in a Maxwell project directory.
+/// It validates child-workflow references before RuntimeHost execution.
 /// </summary>
-public sealed class LocalWorkflowRegistry
+public sealed class WorkflowRegistry
 {
-    private readonly Dictionary<string, LocalWorkflowRegistryEntry> _byId = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, LocalWorkflowRegistryEntry> _byProjectAndName = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, LocalWorkflowRegistryEntry> _byProjectAndFilename = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, WorkflowRegistryEntry> _byId = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, WorkflowRegistryEntry> _byProjectAndName = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, WorkflowRegistryEntry> _byProjectAndFilename = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<string> _warnings;
 
-    public IReadOnlyCollection<LocalWorkflowRegistryEntry> Workflows => _byId.Values;
+    public IReadOnlyCollection<WorkflowRegistryEntry> Workflows => _byId.Values;
     public IReadOnlyList<string> Warnings => _warnings;
 
-    private LocalWorkflowRegistry(List<string> warnings)
+    private WorkflowRegistry(List<string> warnings)
     {
         _warnings = warnings;
     }
 
-    public static LocalWorkflowRegistry Create(string localProjectsRoot)
+    public static WorkflowRegistry Create(string projectRoot)
     {
         List<string> warnings = [];
-        LocalWorkflowRegistry registry = new(warnings);
-        if (string.IsNullOrWhiteSpace(localProjectsRoot) || !Directory.Exists(localProjectsRoot))
+        WorkflowRegistry registry = new(warnings);
+        if (string.IsNullOrWhiteSpace(projectRoot) || !Directory.Exists(projectRoot))
         {
-            warnings.Add("本地项目目录不存在，无法建立 workflow registry。");
+            warnings.Add("项目目录不存在，无法建立 workflow registry。");
             return registry;
         }
 
-        foreach (string jsonFile in Directory.EnumerateFiles(localProjectsRoot, "*.json", SearchOption.AllDirectories))
+        foreach (string jsonFile in Directory.EnumerateFiles(projectRoot, "*.json", SearchOption.AllDirectories))
         {
             registry.TryAdd(jsonFile);
         }
         return registry;
     }
 
-    public bool TryResolve(string reference, out LocalWorkflowRegistryEntry? workflow)
+    public bool TryResolve(string reference, out WorkflowRegistryEntry? workflow)
     {
         workflow = null;
         if (string.IsNullOrWhiteSpace(reference)) return false;
@@ -73,7 +72,7 @@ public sealed class LocalWorkflowRegistry
             (string projectName, _) = SplitProjectAndName(projectAndName);
             if (string.IsNullOrWhiteSpace(projectName)) return;
 
-            LocalWorkflowRegistryEntry entry = new()
+            WorkflowRegistryEntry entry = new()
             {
                 Id = id,
                 Name = name,
@@ -97,9 +96,9 @@ public sealed class LocalWorkflowRegistry
         }
     }
 
-    private void AddUnique(Dictionary<string, LocalWorkflowRegistryEntry> index, string key, LocalWorkflowRegistryEntry entry, string kind)
+    private void AddUnique(Dictionary<string, WorkflowRegistryEntry> index, string key, WorkflowRegistryEntry entry, string kind)
     {
-        if (index.TryGetValue(key, out LocalWorkflowRegistryEntry? existing) &&
+        if (index.TryGetValue(key, out WorkflowRegistryEntry? existing) &&
             !string.Equals(existing.SourceFile, entry.SourceFile, StringComparison.OrdinalIgnoreCase))
         {
             _warnings.Add($"workflow {kind} 重复：{key}（保留 {existing.SourceFile}，忽略 {entry.SourceFile}）。");
@@ -127,7 +126,7 @@ public sealed class LocalWorkflowRegistry
     }
 }
 
-public sealed class LocalWorkflowRegistryEntry
+public sealed class WorkflowRegistryEntry
 {
     public required string Id { get; init; }
     public required string Name { get; init; }

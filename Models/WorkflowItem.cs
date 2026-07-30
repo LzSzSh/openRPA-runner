@@ -14,7 +14,6 @@ public sealed class WorkflowItem : OpenRpaWorkflowLauncher.ViewModels.Observable
     public required string ProjectId { get; init; }
     public required string SourceFile { get; init; }
     public required WorkflowCompatibility Compatibility { get; init; }
-    public bool IsManagedImport { get; init; }
 
     public string WorkflowIdArgument => $@"{ProjectName}\{Filename}";
     public string CompatibilityStatus => Compatibility.Status;

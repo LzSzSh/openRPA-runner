@@ -74,12 +74,70 @@ if (Test-Path $openRpaRuntimeStaging -PathType Container) {
     (Join-Path $runtimeDir "x86"),
     (Join-Path $runtimeDir "grpc_csharp_ext.x86.dll"),
     (Join-Path $runtimeDir "grpc_csharp_ext.x64.dylib"),
+    (Join-Path $runtimeDir "libgrpc_csharp_ext.x64.dylib"),
     (Join-Path $runtimeDir "libgrpc_csharp_ext.x64.so")
   )
   foreach ($excludedRuntimePath in $excludedRuntimePaths) {
     if (Test-Path -LiteralPath $excludedRuntimePath) {
       Remove-Item -LiteralPath $excludedRuntimePath -Recurse -Force
     }
+  }
+
+  # Symbols are useful when developing OpenRPA, but RuntimeHost does not need
+  # them to execute workflows.
+  Get-ChildItem -LiteralPath $runtimeDir -Filter "*.pdb" -File -Recurse |
+    Remove-Item -Force
+
+  # This company build uses Simplified Chinese (with English fallback). Remove
+  # satellite resource folders for languages that cannot be selected by the UI.
+  $excludedCultures = @(
+    "cs", "de", "es", "fr", "it", "ja", "ko", "pl", "pt-BR", "ru", "tr", "zh-Hant"
+  )
+  foreach ($culture in $excludedCultures) {
+    $culturePath = Join-Path $runtimeDir $culture
+    if (Test-Path -LiteralPath $culturePath -PathType Container) {
+      Remove-Item -LiteralPath $culturePath -Recurse -Force
+    }
+  }
+
+  if ($browserMode -ne "LocalOnly") {
+    $bundledChromeRoot = Join-Path $runtimeDir "chrome-portable"
+    $bundledChromeData = Join-Path $bundledChromeRoot "Data"
+
+    # The seed profile only needs the official extension, its preferences and
+    # extension storage. Chrome recreates these caches/models on demand in the
+    # per-user copy, so shipping them only makes the network package larger.
+    $browserCachePaths = @(
+      (Join-Path $bundledChromeRoot "Cache"),
+      (Join-Path $bundledChromeData "optimization_guide_model_store"),
+      (Join-Path $bundledChromeData "GrShaderCache"),
+      (Join-Path $bundledChromeData "BrowserMetrics-spare.pma"),
+      (Join-Path $bundledChromeData "component_crx_cache"),
+      (Join-Path $bundledChromeData "Crashpad"),
+      (Join-Path $bundledChromeData "OptimizationHints"),
+      (Join-Path $bundledChromeData "ShaderCache"),
+      (Join-Path $bundledChromeData "GPUPersistentCache"),
+      (Join-Path $bundledChromeData "Default\GPUCache"),
+      (Join-Path $bundledChromeData "Default\DawnWebGPUCache"),
+      (Join-Path $bundledChromeData "Default\DawnGraphiteCache")
+    )
+    foreach ($browserCachePath in $browserCachePaths) {
+      if (Test-Path -LiteralPath $browserCachePath) {
+        Remove-Item -LiteralPath $browserCachePath -Recurse -Force
+      }
+    }
+
+    # Portable Chrome contains roughly 43 MB of locale packs. Maxwell is
+    # deployed in Chinese, so retain Chinese plus English fallback only.
+    Get-ChildItem -LiteralPath (Join-Path $bundledChromeRoot "Chrome") -Directory |
+      ForEach-Object {
+        $localeDirectory = Join-Path $_.FullName "Locales"
+        if (Test-Path -LiteralPath $localeDirectory -PathType Container) {
+          Get-ChildItem -LiteralPath $localeDirectory -File |
+            Where-Object { $_.Name -notin @("zh-CN.pak", "en-US.pak") } |
+            Remove-Item -Force
+        }
+      }
   }
 } else {
   Write-Warning "runtime-staging was not found. The package will run WWF built-in activities only."

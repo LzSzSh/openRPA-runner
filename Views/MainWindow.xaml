@@ -66,15 +66,6 @@
             </Setter>
         </Style>
 
-        <Style x:Key="AddProjectButtonStyle" TargetType="Button" BasedOn="{StaticResource SidebarButtonStyle}">
-            <Style.Triggers>
-                <DataTrigger Binding="{Binding IsAddProjectSelected}" Value="True">
-                    <Setter Property="Background" Value="{StaticResource SelectedBrush}" />
-                    <Setter Property="Effect" Value="{StaticResource SelectedShadow}" />
-                </DataTrigger>
-            </Style.Triggers>
-        </Style>
-
         <Style x:Key="RecentButtonStyle" TargetType="Button" BasedOn="{StaticResource SidebarButtonStyle}">
             <Style.Triggers>
                 <DataTrigger Binding="{Binding IsRecentProjectsSelected}" Value="True">
