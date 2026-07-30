@@ -1,13 +1,12 @@
-# Maxwell麦威数字员工
+# Maxwell麦威数字助手
 
-Maxwell 是一个面向 OpenRPA workflow 的独立桌面执行器。用户导入 OpenRPA 导出的 workflow JSON 后，由 Maxwell 自带的 RuntimeHost 加载其中的 XAML 并执行；目标电脑不需要安装或启动 OpenRPA。
+Maxwell 是一个面向 OpenRPA workflow 的独立桌面执行器。它直接读取已配置项目目录中的 workflow JSON，并由自带的 RuntimeHost 加载其中的 XAML 并执行；目标电脑不需要安装或启动 OpenRPA。
 
 ## 当前实现
 
 - 沿用原有 .NET 8 WPF GUI。
-- 选择本地项目文件夹，扫描并管理 `_type = "workflow"` 的 JSON。
-- JSON 直接导入本地项目，不再导入 OpenRPA LiteDB。
-- 支持导入 OpenRPA `.rpaproj`：保留 workflow、图片/脚本等项目资源，并生成 `maxwell-project.json` 清单记录 workflow 与 NuGet 依赖声明。
+- 在设置中配置共享/网络工作流根目录，扫描其每个直接子文件夹中的 `_type = "workflow"` JSON。
+- 项目资源和 workflow 直接从网络目录读取与执行，不创建本地 workflow 缓存。
 - 通过独立的 `Maxwell.RuntimeHost.exe` 执行 workflow。
 - RuntimeHost 从 JSON 读取 `Xaml`、`culture` 和 workflow 元数据。
 - 扫描 XAML 中声明的程序集，在运行前报告缺失依赖。
@@ -25,7 +24,7 @@ Maxwell 是一个面向 OpenRPA workflow 的独立桌面执行器。用户导入
 4. Office、图片、脚本、Java、SAP；
 5. 子 workflow、OpenFlow 活动及持久化策略。
 
-后续还将提供可选的 OpenCore 联网模式：由 Maxwell Agent 兼容 OpenCore 的机器人注册、远程调用、参数传递、状态回报和任务队列协议，再交给现有 RuntimeHost 执行。OpenCore 将作为可选调度控制平面；离线导入和本地执行仍不得依赖 OpenCore 或持续网络连接。
+后续还将提供可选的 OpenCore 联网模式：由 Maxwell Agent 兼容 OpenCore 的机器人注册、远程调用、参数传递、状态回报和任务队列协议，再交给现有 RuntimeHost 执行。OpenCore 将作为可选调度控制平面。
 
 如果 workflow 引用了尚未打包的程序集，RuntimeHost 会在执行前返回明确的缺失程序集错误，不会静默执行不完整的流程。
 
@@ -91,23 +90,13 @@ dotnet build .\OpenRpaWorkflowLauncher.csproj -c Release
 两种包都会包含：
 
 ```text
-Maxwell麦威数字员工.exe
+Maxwell麦威数字助手.exe
 runtime\Maxwell.RuntimeHost.exe
 runtime\Maxwell.RuntimeHost.exe.config
 runtime\Newtonsoft.Json.dll
 ```
 
 RuntimeHost 目标为 .NET Framework 4.8，Windows 10/11 通常已具备该运行环境；发布测试仍会显式检查。
-
-## 导入完整 OpenRPA Project
-
-在 Maxwell 中先选择一个本地项目文件夹，再点击“导入 JSON”，选择 OpenRPA 导出的 `.rpaproj` 文件。Maxwell 会在本地项目文件夹中创建同名子目录，保留导出目录结构，并生成：
-
-```text
-<ProjectName>\maxwell-project.json
-```
-
-该文件记录导入时发现的 workflow 和 `.rpaproj` 的 `dependencies`。Maxwell 会建立本地 workflow registry，可通过 `_id`、`Project/Workflow` 或 `Project\Filename` 找到同一项目中的 workflow。当前阶段会保留并报告这些依赖，尚未自动下载第三方 NuGet 包；`InvokeOpenRPA` 子 workflow 的实际执行将在下一项 P2 工作中加入。
 
 ## 本地设置
 

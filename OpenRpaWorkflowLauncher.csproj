@@ -8,9 +8,9 @@
     <UseWindowsForms>true</UseWindowsForms>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <ApplicationIcon />
-    <AssemblyName>Maxwell麦威数字员工</AssemblyName>
-    <Product>Maxwell麦威数字员工</Product>
-    <Title>Maxwell麦威数字员工</Title>
+    <AssemblyName>Maxwell麦威数字助手</AssemblyName>
+    <Product>Maxwell麦威数字助手</Product>
+    <Title>Maxwell麦威数字助手</Title>
     <DebugType>none</DebugType>
     <DebugSymbols>false</DebugSymbols>
     <RootNamespace>OpenRpaWorkflowLauncher</RootNamespace>

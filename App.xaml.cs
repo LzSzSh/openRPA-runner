@@ -39,7 +39,7 @@ public partial class App : System.Windows.Application
         WriteCrashLog(exception);
         System.Windows.MessageBox.Show(
             exception.ToString(),
-            "Maxwell麦威数字员工启动失败",
+            "Maxwell麦威数字助手启动失败",
             System.Windows.MessageBoxButton.OK,
             System.Windows.MessageBoxImage.Error);
     }
