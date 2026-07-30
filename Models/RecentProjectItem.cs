@@ -6,6 +6,7 @@ public sealed class RecentProjectItem : OpenRpaWorkflowLauncher.ViewModels.Obser
 
     public required string Name { get; init; }
     public required string Path { get; init; }
+    public bool IsSharedProject { get; init; }
 
     public bool IsSelected
     {

@@ -110,9 +110,14 @@ namespace Maxwell.RuntimeHost
 
         private static void EnsureBrowserNativeMessagingRegistration(string runtimeDirectory)
         {
-            string hostExecutable = Path.Combine(runtimeDirectory, "OpenRPA.NativeMessagingHost.exe");
-            string manifestPath = Path.Combine(runtimeDirectory, "chromemanifest.json");
-            string templatePath = Path.Combine(runtimeDirectory, "chromemanifest.template.json");
+            string localHostDirectory = Environment.GetEnvironmentVariable("MAXWELL_NATIVE_HOST_DIRECTORY");
+            string hostDirectory = !string.IsNullOrWhiteSpace(localHostDirectory) &&
+                                   File.Exists(Path.Combine(localHostDirectory, "OpenRPA.NativeMessagingHost.exe"))
+                ? localHostDirectory
+                : runtimeDirectory;
+            string hostExecutable = Path.Combine(hostDirectory, "OpenRPA.NativeMessagingHost.exe");
+            string manifestPath = Path.Combine(hostDirectory, "chromemanifest.json");
+            string templatePath = Path.Combine(hostDirectory, "chromemanifest.template.json");
             if (!File.Exists(hostExecutable))
             {
                 throw new RuntimeFailureException(

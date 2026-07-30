@@ -19,10 +19,13 @@ public sealed class MainViewModel : ObservableObject
     private readonly LocalWorkflowImportService _workflowImportService = new();
     private readonly LocalProjectImportService _projectImportService = new();
     private readonly MaxwellRuntimeRunner _runtimeRunner = new();
+    private readonly CompanyDeploymentSettingsService _companyDeploymentSettingsService = new();
     private readonly AppSettings _settings;
     private readonly BrowserModePolicy _browserModePolicy = BrowserModePolicy.Load();
 
     private string? _projectFolder;
+    private string? _sharedLibraryFolder;
+    private string _sharedLibraryStatus = "未配置共享工作流目录";
     private string _currentProjectName = "未选择 Project";
     private string _statusText = "空闲";
     private string _statusKind = "Idle";
@@ -45,11 +48,15 @@ public sealed class MainViewModel : ObservableObject
     {
         _settings = _settingsService.Load();
         _projectFolder = _settings.LastProjectFolder;
+        _sharedLibraryFolder = _companyDeploymentSettingsService.LoadSharedLibraryFolder()
+            ?? _settings.SharedLibraryFolder;
         _runHotkey = _settings.RunHotkey;
         _stopHotkey = _settings.StopHotkey;
         _useBundledBrowser = _browserModePolicy.Availability != BrowserModeAvailability.LocalOnly;
 
         BrowseProjectCommand = new RelayCommand(_ => BrowseProjectFolder());
+        BrowseSharedLibraryCommand = new RelayCommand(_ => BrowseSharedLibraryFolder());
+        SyncSharedLibraryCommand = new AsyncRelayCommand(RefreshSharedLibraryAsync, _ => !IsRunning && !string.IsNullOrWhiteSpace(SharedLibraryFolder));
         OpenProjectFolderCommand = new RelayCommand(_ => OpenProjectFolder(), _ => !string.IsNullOrWhiteSpace(ProjectFolder) && Directory.Exists(ProjectFolder));
         RefreshCommand = new RelayCommand(_ => LoadWorkflows(), _ => !IsRunning && !IsImporting);
         ImportWorkflowCommand = new AsyncRelayCommand(_ => BrowseAndImportAsync(), _ => !IsRunning && !IsImporting);
@@ -90,6 +97,28 @@ public sealed class MainViewModel : ObservableObject
                 OpenProjectFolderCommand.RaiseCanExecuteChanged();
             }
         }
+    }
+
+    public string? SharedLibraryFolder
+    {
+        get => _sharedLibraryFolder;
+        set
+        {
+            if (SetProperty(ref _sharedLibraryFolder, value))
+            {
+                SharedLibraryStatus = string.IsNullOrWhiteSpace(value)
+                    ? "未配置共享工作流目录"
+                    : "路径已保存；点击“立即刷新”读取共享项目。";
+                SaveSettings();
+                SyncSharedLibraryCommand.RaiseCanExecuteChanged();
+            }
+        }
+    }
+
+    public string SharedLibraryStatus
+    {
+        get => _sharedLibraryStatus;
+        private set => SetProperty(ref _sharedLibraryStatus, value);
     }
 
     public string CurrentProjectName
@@ -238,6 +267,7 @@ public sealed class MainViewModel : ObservableObject
                 RefreshCommand.RaiseCanExecuteChanged();
                 RunFirstWorkflowCommand.RaiseCanExecuteChanged();
                 RunWorkflowCommand.RaiseCanExecuteChanged();
+                SyncSharedLibraryCommand.RaiseCanExecuteChanged();
                 StopWorkflowCommand.RaiseCanExecuteChanged();
                 ImportWorkflowCommand.RaiseCanExecuteChanged();
             }
@@ -260,6 +290,8 @@ public sealed class MainViewModel : ObservableObject
     }
 
     public RelayCommand BrowseProjectCommand { get; }
+    public RelayCommand BrowseSharedLibraryCommand { get; }
+    public AsyncRelayCommand SyncSharedLibraryCommand { get; }
     public RelayCommand OpenProjectFolderCommand { get; }
     public RelayCommand RefreshCommand { get; }
     public AsyncRelayCommand ImportWorkflowCommand { get; }
@@ -445,6 +477,21 @@ public sealed class MainViewModel : ObservableObject
         }
     }
 
+    private void BrowseSharedLibraryFolder()
+    {
+        using WinForms.FolderBrowserDialog dialog = new()
+        {
+            Description = "选择网络共享工作流库的根目录",
+            UseDescriptionForTitle = true,
+            SelectedPath = Directory.Exists(SharedLibraryFolder) ? SharedLibraryFolder : string.Empty
+        };
+
+        if (dialog.ShowDialog() == WinForms.DialogResult.OK)
+        {
+            SharedLibraryFolder = dialog.SelectedPath;
+        }
+    }
+
     private void OpenProjectFolder()
     {
         if (string.IsNullOrWhiteSpace(ProjectFolder) || !Directory.Exists(ProjectFolder))
@@ -460,7 +507,7 @@ public sealed class MainViewModel : ObservableObject
         });
     }
 
-    private void LoadWorkflows()
+    private int LoadWorkflows(bool activateWorkflowView = true)
     {
         SynchronizeRecentProjects();
         Workflows.Clear();
@@ -469,16 +516,12 @@ public sealed class MainViewModel : ObservableObject
 
         if (!string.IsNullOrWhiteSpace(ProjectFolder) && Directory.Exists(ProjectFolder))
         {
-            WorkflowScanResult result = _workflowScanner.Scan(ProjectFolder);
-            foreach (WorkflowItem workflow in result.Workflows.OrderBy(item => item.ProjectName).ThenBy(item => item.WorkflowName))
-            {
-                Workflows.Add(workflow);
-            }
+            AddWorkflowsFromFolder(ProjectFolder, null);
+        }
 
-            foreach (string warning in result.Warnings)
-            {
-                Warnings.Add(warning);
-            }
+        if (!string.IsNullOrWhiteSpace(SharedLibraryFolder) && !Directory.Exists(SharedLibraryFolder))
+        {
+            Warnings.Add($"共享工作流目录不可访问：{SharedLibraryFolder}");
         }
 
         WorkflowView.Refresh();
@@ -493,11 +536,53 @@ public sealed class MainViewModel : ObservableObject
         SetStatus($"空闲，已加载 {Workflows.Count} 个 workflow", Workflows.Count > 0 ? "Idle" : "Warning");
         AddLog($"刷新完成：{ProjectFolder}，当前显示 {Workflows.Count} 个 workflow，警告 {Warnings.Count} 条。");
         AddRecentProject();
-        if (Workflows.Count > 0)
+        if (Workflows.Count > 0 && activateWorkflowView)
         {
             ActiveView = "Workflow";
             IsRecentExpanded = true;
         }
+
+        return Workflows.Count;
+    }
+
+    private void AddWorkflowsFromFolder(string folder, string? sourceLabel)
+    {
+        WorkflowScanResult result = _workflowScanner.Scan(folder);
+        foreach (WorkflowItem workflow in result.Workflows.OrderBy(item => item.ProjectName).ThenBy(item => item.WorkflowName))
+        {
+            Workflows.Add(workflow);
+        }
+
+        foreach (string warning in result.Warnings)
+        {
+            Warnings.Add(string.IsNullOrWhiteSpace(sourceLabel) ? warning : $"{sourceLabel}：{warning}");
+        }
+    }
+
+    private Task RefreshSharedLibraryAsync(object? parameter)
+    {
+        if (IsRunning || string.IsNullOrWhiteSpace(SharedLibraryFolder)) return Task.CompletedTask;
+
+        try
+        {
+            SharedLibraryStatus = "正在读取共享工作流目录…";
+            LoadWorkflows(activateWorkflowView: false);
+            int sharedProjectCount = RecentProjects.Count(item => item.IsSharedProject);
+            if (sharedProjectCount > 0)
+            {
+                IsRecentExpanded = true;
+            }
+            SharedLibraryStatus = Directory.Exists(SharedLibraryFolder)
+                ? $"已读取共享目录：发现 {sharedProjectCount} 个项目；点击左侧项目查看 workflow"
+                : $"共享工作流目录不可访问：{SharedLibraryFolder}";
+        }
+        catch (Exception ex)
+        {
+            SharedLibraryStatus = "读取共享目录失败：" + ex.Message;
+            AddLog(SharedLibraryStatus);
+        }
+
+        return Task.CompletedTask;
     }
 
     private async Task RunWorkflowAsync(object? parameter)
@@ -781,12 +866,28 @@ public sealed class MainViewModel : ObservableObject
     private void LoadRecentProjects()
     {
         RecentProjects.Clear();
-        foreach (RecentProjectInfo item in _settings.RecentProjects.Where(item => Directory.Exists(item.Path)))
+        HashSet<string> knownPaths = new(StringComparer.OrdinalIgnoreCase);
+
+        foreach (string sharedProjectPath in GetSharedProjectPaths())
+        {
+            knownPaths.Add(sharedProjectPath);
+            RecentProjects.Add(new RecentProjectItem
+            {
+                Name = GetFolderDisplayName(sharedProjectPath),
+                Path = sharedProjectPath,
+                IsSharedProject = true,
+                IsSelected = string.Equals(sharedProjectPath, ProjectFolder, StringComparison.OrdinalIgnoreCase)
+                    && ActiveView == "Workflow"
+            });
+        }
+
+        foreach (RecentProjectInfo item in _settings.RecentProjects.Where(item => Directory.Exists(item.Path) && knownPaths.Add(item.Path)))
         {
             RecentProjects.Add(new RecentProjectItem
             {
                 Name = GetFolderDisplayName(item.Path),
                 Path = item.Path,
+                IsSharedProject = false,
                 IsSelected = string.Equals(item.Path, ProjectFolder, StringComparison.OrdinalIgnoreCase)
                     && ActiveView == "Workflow"
             });
@@ -823,7 +924,7 @@ public sealed class MainViewModel : ObservableObject
         {
             ProjectFolder = null;
             CurrentProjectName = "未选择本地项目";
-            AddLog("当前本地项目文件夹已被删除，已从最近项目中移除。");
+            AddLog("当前项目文件夹已被删除，已从项目列表中移除。");
         }
         else if (recentProjectsChanged)
         {
@@ -896,6 +997,14 @@ public sealed class MainViewModel : ObservableObject
             return;
         }
 
+        // Shared projects are discovered from the configured root every time;
+        // do not persist them as user-specific manual history entries.
+        if (IsSharedProjectPath(ProjectFolder))
+        {
+            LoadRecentProjects();
+            return;
+        }
+
         string name = GetProjectFolderDisplayName();
         RecentProjectInfo? existing = _settings.RecentProjects.FirstOrDefault(item =>
             string.Equals(item.Path, ProjectFolder, StringComparison.OrdinalIgnoreCase));
@@ -917,6 +1026,7 @@ public sealed class MainViewModel : ObservableObject
     private void SaveSettings()
     {
         _settings.LastProjectFolder = ProjectFolder;
+        _settings.SharedLibraryFolder = SharedLibraryFolder;
         _settings.RunHotkey = RunHotkey;
         _settings.StopHotkey = StopHotkey;
         _settingsService.Save(_settings);
@@ -974,5 +1084,31 @@ public sealed class MainViewModel : ObservableObject
     {
         string? name = Path.GetFileName(folderPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
         return string.IsNullOrWhiteSpace(name) ? folderPath : name;
+    }
+
+    private IEnumerable<string> GetSharedProjectPaths()
+    {
+        if (string.IsNullOrWhiteSpace(SharedLibraryFolder) || !Directory.Exists(SharedLibraryFolder))
+        {
+            return [];
+        }
+
+        try
+        {
+            return Directory.EnumerateDirectories(SharedLibraryFolder)
+                .OrderBy(GetFolderDisplayName, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+        catch (Exception ex)
+        {
+            AddLog($"读取共享项目列表失败：{ex.Message}");
+            return [];
+        }
+    }
+
+    private bool IsSharedProjectPath(string path)
+    {
+        return GetSharedProjectPaths().Any(sharedPath =>
+            string.Equals(sharedPath, path, StringComparison.OrdinalIgnoreCase));
     }
 }

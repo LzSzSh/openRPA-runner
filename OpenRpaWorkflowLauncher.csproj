@@ -17,6 +17,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Content Include="company-settings.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
     <!-- Ignore stale generated files if an older checkout built the removed legacy projects. -->
     <Compile Remove="OpenRpaImportHelper\**\*.cs" />
     <Compile Remove="OpenRpaOfficialBridge\**\*.cs" />

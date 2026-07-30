@@ -24,10 +24,8 @@ index d835e2a6..9de1d1a3 100644
 +                !string.IsNullOrWhiteSpace(maxwellChrome) && File.Exists(maxwellChrome))
 +            {
 +                string maxwellProfile = Environment.GetEnvironmentVariable("MAXWELL_BROWSER_PROFILE");
-+                string maxwellExtension = Environment.GetEnvironmentVariable("MAXWELL_BROWSER_EXTENSION");
 +                string prefix = "--no-first-run --no-default-browser-check --disable-default-apps --allow-file-access-from-files";
 +                if (!string.IsNullOrWhiteSpace(maxwellProfile)) prefix += " --user-data-dir=\"" + maxwellProfile + "\"";
-+                if (!string.IsNullOrWhiteSpace(maxwellExtension) && Directory.Exists(maxwellExtension)) prefix += " --load-extension=\"" + maxwellExtension + "\"";
 +
 +                filename = maxwellChrome;
 +                arguments = prefix + (string.IsNullOrWhiteSpace(browserUrl) ? string.Empty : " \"" + browserUrl + "\"") +

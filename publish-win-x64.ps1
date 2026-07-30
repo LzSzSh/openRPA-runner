@@ -1,5 +1,5 @@
 param(
-  [ValidateSet("Slim", "Standalone", "Bundled", "LocalBrowser")]
+  [ValidateSet("Slim", "Standalone", "Bundled", "LocalBrowser", "Shared")]
   [string]$Mode = "Bundled"
 )
 
@@ -11,6 +11,7 @@ Set-Location $projectDir
 $publishDir = switch ($Mode) {
   "Bundled" { ".\publish\Maxwell-version4-bundled" }
   "LocalBrowser" { ".\publish\Maxwell-version4-local-browser" }
+  "Shared" { ".\publish\Maxwell-shared-direct" }
   "Standalone" { ".\publish\Maxwell-version4" }
   default { ".\publish\win-x64-slim" }
 }
@@ -50,6 +51,7 @@ $runtimeDir = Join-Path $publishDir "runtime"
 New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null
 Copy-Item .\Maxwell.RuntimeHost\bin\Release\net48\* $runtimeDir -Recurse -Force
 Copy-Item .\install-browser-automation.ps1 $publishDir -Force
+Copy-Item .\install-openrpa-extension.ps1 $publishDir -Force
 
 $openRpaRuntimeStaging = ".\runtime-staging"
 if (Test-Path $openRpaRuntimeStaging -PathType Container) {
@@ -84,13 +86,6 @@ if (Test-Path $openRpaRuntimeStaging -PathType Container) {
   Write-Warning "Run ..\scripts\build-openrpa-runtime.ps1 on Windows before publishing OpenRPA activity support."
 }
 
-$browserExtensionSource = ".\BrowserExtension"
-$browserExtensionDestination = Join-Path $runtimeDir "browser-extension"
-if (-not (Test-Path (Join-Path $browserExtensionSource "manifest.json") -PathType Leaf)) {
-  throw "The Maxwell MV3 browser extension is missing: $browserExtensionSource"
-}
-Copy-Item $browserExtensionSource $browserExtensionDestination -Recurse -Force
-
 # Windows PowerShell 5.1 may decode a UTF-8 script without BOM using the
 # system code page. Do not hard-code the Chinese assembly name here; the GUI
 # is the large single-file executable emitted by dotnet publish.
@@ -104,11 +99,15 @@ $runtimeExe = Join-Path $runtimeDir "Maxwell.RuntimeHost.exe"
 $runtimeConfig = Join-Path $runtimeDir "Maxwell.RuntimeHost.exe.config"
 $runtimeJson = Join-Path $runtimeDir "Newtonsoft.Json.dll"
 $browserInstaller = Join-Path $publishDir "install-browser-automation.ps1"
+$localBrowserExtensionInstaller = Join-Path $publishDir "install-openrpa-extension.ps1"
 $browserModeConfig = Join-Path $publishDir "browser-mode.json"
 $browserManifestTemplate = Join-Path $runtimeDir "chromemanifest.template.json"
-$bundledBrowserExtensionManifest = Join-Path $browserExtensionDestination "manifest.json"
 @{ BrowserMode = $browserMode } | ConvertTo-Json | Set-Content -Path $browserModeConfig -Encoding UTF8
-$requiredFiles = @($appExe, $runtimeExe, $runtimeConfig, $runtimeJson, $browserInstaller, $browserManifestTemplate, $bundledBrowserExtensionManifest, $browserModeConfig)
+$bundledBrowserProfileManifest = Join-Path $runtimeDir "chrome-portable\Data\Default\Extensions\hpnihnhlcnfejboocnckgchjdofeaphe\1.0.0.6_0\manifest.json"
+$requiredFiles = @($appExe, $runtimeExe, $runtimeConfig, $runtimeJson, $browserInstaller, $localBrowserExtensionInstaller, $browserManifestTemplate, $browserModeConfig)
+if ($browserMode -ne "LocalOnly") {
+  $requiredFiles += $bundledBrowserProfileManifest
+}
 foreach ($requiredFile in $requiredFiles) {
   if ([string]::IsNullOrWhiteSpace($requiredFile) -or -not (Test-Path $requiredFile -PathType Leaf)) {
     throw "Missing published file: $requiredFile"
@@ -118,6 +117,7 @@ foreach ($requiredFile in $requiredFiles) {
 $zipFile = switch ($Mode) {
   "Bundled" { ".\publish\Maxwell-version4-bundled.zip" }
   "LocalBrowser" { ".\publish\Maxwell-version4-local-browser.zip" }
+  "Shared" { ".\publish\Maxwell-shared-direct.zip" }
   "Standalone" { ".\publish\Maxwell-version4.zip" }
   default { ".\publish\Maxwell-win-x64-slim.zip" }
 }
@@ -127,7 +127,11 @@ Write-Host ""
 Write-Host "Published app: $appExe"
 Write-Host "Maxwell RuntimeHost: $runtimeExe"
 Write-Host "Browser Native Messaging setup: $browserInstaller"
-Write-Host "Bundled MV3 browser extension: $browserExtensionDestination"
+if ($browserMode -ne "LocalOnly") {
+  Write-Host "Bundled OpenRPA browser profile: $bundledBrowserProfileManifest"
+} else {
+  Write-Host "OpenRPA extension installer for local Chrome: $localBrowserExtensionInstaller"
+}
 Write-Host "Distribution package: $projectDir\$zipFile"
 if ($Mode -eq "Slim") {
   Write-Host "The slim package requires .NET 8 Desktop Runtime."

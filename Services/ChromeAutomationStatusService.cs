@@ -7,11 +7,15 @@ namespace OpenRpaWorkflowLauncher.Services;
 
 public sealed class ChromeAutomationStatusService
 {
-    private const string NativeHostRegistryPath = @"Software\Google\Chrome\NativeMessagingHosts\com.openrpa.msg";
+    private static readonly string[] NativeHostRegistryPaths =
+    [
+        @"Software\Google\Chrome\NativeMessagingHosts\com.openrpa.msg",
+        @"Software\Microsoft\Edge\NativeMessagingHosts\com.openrpa.msg"
+    ];
 
-    public void RegisterBundledNativeHost()
+    public void RegisterBundledNativeHost(string? runtimeDirectory = null)
     {
-        string runtimeDirectory = Path.Combine(AppContext.BaseDirectory, "runtime");
+        runtimeDirectory ??= Path.Combine(AppContext.BaseDirectory, "runtime");
         string hostExecutable = Path.Combine(runtimeDirectory, "OpenRPA.NativeMessagingHost.exe");
         string manifestPath = Path.Combine(runtimeDirectory, "chromemanifest.json");
         string templatePath = Path.Combine(runtimeDirectory, "chromemanifest.template.json");
@@ -41,7 +45,10 @@ public sealed class ChromeAutomationStatusService
         }
 
         File.WriteAllText(manifestPath, manifest, new UTF8Encoding(false));
-        using RegistryKey? key = Registry.CurrentUser.CreateSubKey(NativeHostRegistryPath);
-        key?.SetValue(string.Empty, manifestPath, RegistryValueKind.String);
+        foreach (string registryPath in NativeHostRegistryPaths)
+        {
+            using RegistryKey? key = Registry.CurrentUser.CreateSubKey(registryPath);
+            key?.SetValue(string.Empty, manifestPath, RegistryValueKind.String);
+        }
     }
 }

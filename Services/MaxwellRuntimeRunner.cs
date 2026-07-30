@@ -42,9 +42,23 @@ public sealed class MaxwellRuntimeRunner
             startInfo.ArgumentList.Add("--workflow-root");
             startInfo.ArgumentList.Add(ResolveWorkflowRoot(workflow));
 
+            // Native Messaging is needed by both distribution variants. The
+            // bundled-browser package ships a profile with the extension
+            // already installed; the local-browser package relies on the
+            // user's one-time installation of that same official extension.
+            // In either case the executable and registry manifest must live
+            // under the current Windows user's local profile, never on a UNC
+            // share.
+            string? nativeHostDirectory = BundledChromeLocator.EnsureLocalNativeMessagingHostDirectory();
+            if (!string.IsNullOrWhiteSpace(nativeHostDirectory))
+            {
+                new ChromeAutomationStatusService().RegisterBundledNativeHost(nativeHostDirectory);
+                startInfo.Environment["MAXWELL_NATIVE_HOST_DIRECTORY"] = nativeHostDirectory;
+            }
+
             if (useBundledBrowser)
             {
-                string? bundledChromeDirectory = BundledChromeLocator.FindBundledChromeDirectory();
+                string? bundledChromeDirectory = BundledChromeLocator.EnsureLocalBundledChromeDirectory();
                 if (!string.IsNullOrWhiteSpace(bundledChromeDirectory))
                 {
                     string existingPath = startInfo.Environment.TryGetValue("PATH", out string? currentPath)
@@ -52,17 +66,8 @@ public sealed class MaxwellRuntimeRunner
                         : Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
                     startInfo.Environment["PATH"] = bundledChromeDirectory + Path.PathSeparator + existingPath;
                     startInfo.Environment["MAXWELL_BUNDLED_CHROME"] = Path.Combine(bundledChromeDirectory, "chrome.exe");
-                    startInfo.Environment["MAXWELL_BROWSER_PROFILE"] = BundledChromeLocator.MaxwellBrowserProfileDirectory;
-                }
-
-                string? bundledExtensionDirectory = BundledChromeLocator.FindBundledExtensionDirectory();
-                if (!string.IsNullOrWhiteSpace(bundledExtensionDirectory))
-                {
-                    startInfo.Environment["MAXWELL_BROWSER_EXTENSION"] = bundledExtensionDirectory;
-                    // Register before any workflow can launch the bundled browser.
-                    // This also covers simple Utilities.StartProcess workflows that
-                    // do not reference the OpenRPA.NM assembly directly.
-                    new ChromeAutomationStatusService().RegisterBundledNativeHost();
+                    startInfo.Environment["MAXWELL_BROWSER_PROFILE"] =
+                        BundledChromeLocator.EnsureLocalBundledBrowserProfileDirectory();
                 }
             }
 

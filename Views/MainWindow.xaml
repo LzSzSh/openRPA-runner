@@ -587,6 +587,52 @@
                                Margin="0,14,0,0" />
                 </Grid>
 
+                <Border Grid.Row="3"
+                        MaxWidth="820"
+                        HorizontalAlignment="Left"
+                        Margin="0,32,0,0"
+                        Padding="22"
+                        Background="#F8FAFC"
+                        BorderBrush="{StaticResource LineBrush}"
+                        BorderThickness="1"
+                        CornerRadius="10">
+                    <StackPanel>
+                        <TextBlock Text="公司共享工作流目录"
+                                   FontSize="18"
+                                   FontWeight="SemiBold" />
+                        <TextBlock Text="输入路径后仅保存设置；点击“立即刷新”读取项目。读取完成后会保留在此页面，供你确认结果。执行时直接使用网络路径，不创建本地缓存。"
+                                   Foreground="{StaticResource TextMutedBrush}"
+                                   TextWrapping="Wrap"
+                                   Margin="0,6,0,16" />
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBox Grid.Column="0"
+                                     Text="{Binding SharedLibraryFolder, UpdateSourceTrigger=PropertyChanged}"
+                                     MinHeight="38"
+                                     VerticalContentAlignment="Center" />
+                            <Button Grid.Column="1"
+                                    Content="浏览…"
+                                    Command="{Binding BrowseSharedLibraryCommand}"
+                                    MinWidth="76"
+                                    Margin="8,0,0,0" />
+                            <Button Grid.Column="2"
+                                    Content="立即刷新"
+                                    Command="{Binding SyncSharedLibraryCommand}"
+                                    Style="{StaticResource ExecuteButtonStyle}"
+                                    MinWidth="96"
+                                    Margin="8,0,0,0" />
+                        </Grid>
+                        <TextBlock Text="{Binding SharedLibraryStatus}"
+                                   Foreground="{StaticResource TextMutedBrush}"
+                                   TextWrapping="Wrap"
+                                   Margin="0,12,0,0" />
+                    </StackPanel>
+                </Border>
+
             </Grid>
 
             <Grid Visibility="{Binding IsWorkflowVisible}" Margin="28">
