@@ -27,6 +27,14 @@
     <EmbeddedResource Remove="Maxwell.RuntimeHost\**\*" />
     <None Remove="Maxwell.RuntimeHost\**\*" />
     <Page Remove="Maxwell.RuntimeHost\**\*" />
+    <Compile Remove="Maxwell.NotificationHost\**\*.cs" />
+    <EmbeddedResource Remove="Maxwell.NotificationHost\**\*" />
+    <None Remove="Maxwell.NotificationHost\**\*" />
+    <Page Remove="Maxwell.NotificationHost\**\*" />
+    <Compile Remove="Maxwell.ChromeLauncher\**\*.cs" />
+    <EmbeddedResource Remove="Maxwell.ChromeLauncher\**\*" />
+    <None Remove="Maxwell.ChromeLauncher\**\*" />
+    <Page Remove="Maxwell.ChromeLauncher\**\*" />
     <Compile Remove="run-test\**\*.cs" />
     <EmbeddedResource Remove="run-test\**\*" />
     <None Remove="run-test\**\*" />
