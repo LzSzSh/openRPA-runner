@@ -6,7 +6,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
-    <ApplicationIcon />
+    <ApplicationIcon>Assets\Maxwell.ico</ApplicationIcon>
     <AssemblyName>Maxwell麦威数字助手</AssemblyName>
     <Product>Maxwell麦威数字助手</Product>
     <Title>Maxwell麦威数字助手</Title>
@@ -16,6 +16,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Resource Include="Assets\Maxwell.ico" />
     <Content Include="company-settings.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
@@ -27,6 +28,14 @@
     <EmbeddedResource Remove="Maxwell.RuntimeHost\**\*" />
     <None Remove="Maxwell.RuntimeHost\**\*" />
     <Page Remove="Maxwell.RuntimeHost\**\*" />
+    <Compile Remove="Maxwell.NotificationHost\**\*.cs" />
+    <EmbeddedResource Remove="Maxwell.NotificationHost\**\*" />
+    <None Remove="Maxwell.NotificationHost\**\*" />
+    <Page Remove="Maxwell.NotificationHost\**\*" />
+    <Compile Remove="Maxwell.ChromeLauncher\**\*.cs" />
+    <EmbeddedResource Remove="Maxwell.ChromeLauncher\**\*" />
+    <None Remove="Maxwell.ChromeLauncher\**\*" />
+    <Page Remove="Maxwell.ChromeLauncher\**\*" />
     <Compile Remove="run-test\**\*.cs" />
     <EmbeddedResource Remove="run-test\**\*" />
     <None Remove="run-test\**\*" />

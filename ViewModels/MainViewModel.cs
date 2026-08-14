@@ -3,6 +3,7 @@ using System.ComponentModel;
 using System.IO;
 using System.Windows;
 using System.Windows.Data;
+using System.Windows.Threading;
 using OpenRpaWorkflowLauncher.Models;
 using OpenRpaWorkflowLauncher.Services;
 
@@ -14,6 +15,8 @@ public sealed class MainViewModel : ObservableObject
     private readonly WorkflowScanner _workflowScanner = new();
     private readonly MaxwellRuntimeRunner _runtimeRunner = new();
     private readonly CompanyDeploymentSettingsService _companyDeploymentSettingsService = new();
+    private readonly ChromeAutomationStatusService _chromeAutomationStatusService = new();
+    private readonly AutomationScheduleService _automationScheduleService = new();
     private readonly AppSettings _settings;
     private readonly BrowserModePolicy _browserModePolicy = BrowserModePolicy.Load();
 
@@ -36,6 +39,25 @@ public sealed class MainViewModel : ObservableObject
     private bool _isRecentSearchVisible;
     private bool _isRecentHeaderSelected;
     private bool _useBundledBrowser;
+    private string _browserAutomationStatus = "未检查。浏览器流程执行前建议点击“检查”。";
+    private WorkMode _workMode;
+    private readonly DispatcherTimer _automationTimer;
+    private string? _automationSearchText;
+    private string? _projectPickerSearchText;
+    private bool _isAutomationEditorVisible;
+    private RecentProjectItem? _selectedAutomationProject;
+    private string _automationScheduleType = "Weekly";
+    private int _automationDayOfMonth = 1;
+    private int _automationHour = 9;
+    private int _automationMinute;
+    private bool _monday = true;
+    private bool _tuesday;
+    private bool _wednesday;
+    private bool _thursday;
+    private bool _friday;
+    private bool _saturday;
+    private bool _sunday;
+    private string? _automationValidationMessage;
 
     public MainViewModel()
     {
@@ -45,34 +67,58 @@ public sealed class MainViewModel : ObservableObject
         _runHotkey = _settings.RunHotkey;
         _stopHotkey = _settings.StopHotkey;
         _useBundledBrowser = _browserModePolicy.Availability != BrowserModeAvailability.LocalOnly;
+        _workMode = Enum.TryParse(_settings.WorkMode, ignoreCase: true, out WorkMode savedMode)
+            ? savedMode
+            : WorkMode.Runtime;
 
         BrowseSharedLibraryCommand = new RelayCommand(_ => BrowseSharedLibraryFolder());
         SyncSharedLibraryCommand = new AsyncRelayCommand(RefreshSharedLibraryAsync, _ => !IsRunning && !string.IsNullOrWhiteSpace(SharedLibraryFolder));
         RefreshCommand = new RelayCommand(_ => LoadWorkflows(), _ => !IsRunning);
-        RunFirstWorkflowCommand = new AsyncRelayCommand(RunFirstWorkflowAsync, _ => !IsRunning && Workflows.Count > 0);
-        RunWorkflowCommand = new AsyncRelayCommand(RunWorkflowAsync, parameter => !IsRunning && parameter is WorkflowItem workflow && workflow.CanRun);
+        RunFirstWorkflowCommand = new AsyncRelayCommand(RunFirstWorkflowAsync, _ => IsRuntimeMode && !IsRunning && Workflows.Count > 0);
+        RunWorkflowCommand = new AsyncRelayCommand(RunWorkflowAsync, parameter => IsRuntimeMode && !IsRunning && parameter is WorkflowItem workflow && workflow.CanRun);
         StopWorkflowCommand = new AsyncRelayCommand(StopWorkflowAsync, _ => IsRunning);
         ClearLogsCommand = new RelayCommand(_ => Logs.Clear());
         ShowRecentProjectsCommand = new RelayCommand(_ => ShowRecentProjects());
         ShowSettingsCommand = new RelayCommand(_ => ShowSettings());
+        ShowAutomationsCommand = new RelayCommand(_ => ShowAutomations());
+        ShowAutomationEditorCommand = new RelayCommand(_ => ShowAutomationEditor());
+        CancelAutomationEditorCommand = new RelayCommand(_ => IsAutomationEditorVisible = false);
+        AddAutomationCommand = new RelayCommand(_ => AddAutomation());
+        DeleteAutomationCommand = new RelayCommand(DeleteAutomation);
         ClearRunHotkeyCommand = new RelayCommand(_ => SetRunHotkey(null));
         ClearStopHotkeyCommand = new RelayCommand(_ => SetStopHotkey(null));
         SelectRecentProjectCommand = new RelayCommand(SelectRecentProject);
         ToggleRecentProjectSearchCommand = new RelayCommand(_ => ToggleRecentProjectSearch());
+        CheckBrowserAutomationCommand = new RelayCommand(_ => CheckBrowserAutomation());
+        SwitchToRuntimeModeCommand = new RelayCommand(_ => SwitchWorkMode(WorkMode.Runtime), _ => !IsRunning && !IsRuntimeMode);
+        SwitchToEditModeCommand = new RelayCommand(_ => SwitchWorkMode(WorkMode.Edit), _ => !IsRunning && !IsEditMode);
         WorkflowView = CollectionViewSource.GetDefaultView(Workflows);
         WorkflowView.Filter = FilterWorkflow;
         RecentProjectView = CollectionViewSource.GetDefaultView(RecentProjects);
         RecentProjectView.Filter = FilterRecentProject;
+        AutomationView = CollectionViewSource.GetDefaultView(Automations);
+        AutomationView.Filter = FilterAutomation;
+        AutomationProjectView = CollectionViewSource.GetDefaultView(AutomationProjects);
+        AutomationProjectView.Filter = FilterAutomationProject;
+        foreach (ScheduledAutomation automation in _automationScheduleService.Load()) Automations.Add(automation);
+        _automationTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(20) };
+        _automationTimer.Tick += AutomationTimer_Tick;
+        _automationTimer.Start();
         SynchronizeRecentProjects();
         LoadWorkflows();
+        ApplyInitialWorkMode();
     }
 
     public ObservableCollection<WorkflowItem> Workflows { get; } = [];
     public ObservableCollection<string> Warnings { get; } = [];
     public ObservableCollection<string> Logs { get; } = [];
     public ObservableCollection<RecentProjectItem> RecentProjects { get; } = [];
+    public ObservableCollection<ScheduledAutomation> Automations { get; } = [];
+    public ObservableCollection<RecentProjectItem> AutomationProjects { get; } = [];
     public ICollectionView WorkflowView { get; }
     public ICollectionView RecentProjectView { get; }
+    public ICollectionView AutomationView { get; }
+    public ICollectionView AutomationProjectView { get; }
 
     public string? ProjectFolder
     {
@@ -159,8 +205,10 @@ public sealed class MainViewModel : ObservableObject
                 OnPropertyChanged(nameof(IsHomeVisible));
                 OnPropertyChanged(nameof(IsWorkflowVisible));
                 OnPropertyChanged(nameof(IsSettingsVisible));
+                OnPropertyChanged(nameof(IsAutomationsVisible));
                 OnPropertyChanged(nameof(IsRecentProjectsSelected));
                 OnPropertyChanged(nameof(IsSettingsSelected));
+                OnPropertyChanged(nameof(IsAutomationsSelected));
             }
         }
     }
@@ -168,8 +216,88 @@ public sealed class MainViewModel : ObservableObject
     public Visibility IsHomeVisible => ActiveView == "Home" ? Visibility.Visible : Visibility.Collapsed;
     public Visibility IsWorkflowVisible => ActiveView == "Workflow" ? Visibility.Visible : Visibility.Collapsed;
     public Visibility IsSettingsVisible => ActiveView == "Settings" ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility IsAutomationsVisible => ActiveView == "Automations" ? Visibility.Visible : Visibility.Collapsed;
     public bool IsRecentProjectsSelected => _isRecentHeaderSelected;
     public bool IsSettingsSelected => ActiveView == "Settings";
+    public bool IsAutomationsSelected => ActiveView == "Automations";
+
+    public string? AutomationSearchText
+    {
+        get => _automationSearchText;
+        set
+        {
+            if (SetProperty(ref _automationSearchText, value)) AutomationView.Refresh();
+        }
+    }
+
+    public string? ProjectPickerSearchText
+    {
+        get => _projectPickerSearchText;
+        set
+        {
+            if (SetProperty(ref _projectPickerSearchText, value)) AutomationProjectView.Refresh();
+        }
+    }
+
+    public bool IsAutomationEditorVisible
+    {
+        get => _isAutomationEditorVisible;
+        private set => SetProperty(ref _isAutomationEditorVisible, value);
+    }
+
+    public RecentProjectItem? SelectedAutomationProject
+    {
+        get => _selectedAutomationProject;
+        set => SetProperty(ref _selectedAutomationProject, value);
+    }
+
+    public bool IsWeeklySchedule
+    {
+        get => _automationScheduleType == "Weekly";
+        set
+        {
+            if (value && _automationScheduleType != "Weekly")
+            {
+                _automationScheduleType = "Weekly";
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(IsMonthlySchedule));
+            }
+        }
+    }
+
+    public bool IsMonthlySchedule
+    {
+        get => _automationScheduleType == "Monthly";
+        set
+        {
+            if (value && _automationScheduleType != "Monthly")
+            {
+                _automationScheduleType = "Monthly";
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(IsWeeklySchedule));
+            }
+        }
+    }
+
+    public int AutomationDayOfMonth { get => _automationDayOfMonth; set => SetProperty(ref _automationDayOfMonth, value); }
+    public int AutomationHour { get => _automationHour; set => SetProperty(ref _automationHour, value); }
+    public int AutomationMinute { get => _automationMinute; set => SetProperty(ref _automationMinute, value); }
+    public bool Monday { get => _monday; set => SetProperty(ref _monday, value); }
+    public bool Tuesday { get => _tuesday; set => SetProperty(ref _tuesday, value); }
+    public bool Wednesday { get => _wednesday; set => SetProperty(ref _wednesday, value); }
+    public bool Thursday { get => _thursday; set => SetProperty(ref _thursday, value); }
+    public bool Friday { get => _friday; set => SetProperty(ref _friday, value); }
+    public bool Saturday { get => _saturday; set => SetProperty(ref _saturday, value); }
+    public bool Sunday { get => _sunday; set => SetProperty(ref _sunday, value); }
+    public string? AutomationValidationMessage
+    {
+        get => _automationValidationMessage;
+        private set => SetProperty(ref _automationValidationMessage, value);
+    }
+
+    public IReadOnlyList<int> MonthDays { get; } = Enumerable.Range(1, 31).ToList();
+    public IReadOnlyList<int> Hours { get; } = Enumerable.Range(0, 24).ToList();
+    public IReadOnlyList<int> Minutes { get; } = Enumerable.Range(0, 60).ToList();
 
     public string RunHotkeyText => string.IsNullOrWhiteSpace(RunHotkey) ? "未设置" : RunHotkey;
     public string StopHotkeyText => string.IsNullOrWhiteSpace(StopHotkey) ? "未设置" : StopHotkey;
@@ -209,6 +337,19 @@ public sealed class MainViewModel : ObservableObject
         get => _hotkeyError;
         private set => SetProperty(ref _hotkeyError, value);
     }
+
+    public string BrowserAutomationStatus
+    {
+        get => _browserAutomationStatus;
+        private set => SetProperty(ref _browserAutomationStatus, value);
+    }
+
+    public bool IsRuntimeMode => _workMode == WorkMode.Runtime;
+    public bool IsEditMode => _workMode == WorkMode.Edit;
+    public string WorkModeTitle => IsRuntimeMode ? "运行模式" : "编辑模式";
+    public string WorkModeDescription => IsRuntimeMode
+        ? "Maxwell 接管浏览器自动化，可以执行项目流程。"
+        : "OpenRPA 接管浏览器自动化，用于录制、高亮和调试元素；Maxwell 不允许执行项目流程。";
 
     public bool IsRecentExpanded
     {
@@ -250,6 +391,8 @@ public sealed class MainViewModel : ObservableObject
                 RunWorkflowCommand.RaiseCanExecuteChanged();
                 SyncSharedLibraryCommand.RaiseCanExecuteChanged();
                 StopWorkflowCommand.RaiseCanExecuteChanged();
+                SwitchToRuntimeModeCommand.RaiseCanExecuteChanged();
+                SwitchToEditModeCommand.RaiseCanExecuteChanged();
             }
         }
     }
@@ -263,10 +406,18 @@ public sealed class MainViewModel : ObservableObject
     public RelayCommand ClearLogsCommand { get; }
     public RelayCommand ShowRecentProjectsCommand { get; }
     public RelayCommand ShowSettingsCommand { get; }
+    public RelayCommand ShowAutomationsCommand { get; }
+    public RelayCommand ShowAutomationEditorCommand { get; }
+    public RelayCommand CancelAutomationEditorCommand { get; }
+    public RelayCommand AddAutomationCommand { get; }
+    public RelayCommand DeleteAutomationCommand { get; }
     public RelayCommand ClearRunHotkeyCommand { get; }
     public RelayCommand ClearStopHotkeyCommand { get; }
     public RelayCommand SelectRecentProjectCommand { get; }
     public RelayCommand ToggleRecentProjectSearchCommand { get; }
+    public RelayCommand CheckBrowserAutomationCommand { get; }
+    public RelayCommand SwitchToRuntimeModeCommand { get; }
+    public RelayCommand SwitchToEditModeCommand { get; }
 
     public bool TrySetHotkey(string target, string key)
     {
@@ -395,8 +546,17 @@ public sealed class MainViewModel : ObservableObject
         return Task.CompletedTask;
     }
 
-    private async Task RunWorkflowAsync(object? parameter)
+    private Task RunWorkflowAsync(object? parameter) => RunWorkflowAsync(parameter, showFailureDialog: true);
+
+    private async Task RunWorkflowAsync(object? parameter, bool showFailureDialog)
     {
+        if (!IsRuntimeMode)
+        {
+            SetStatus("当前是编辑模式，请切换到运行模式后再执行。", "Warning");
+            AddLog("已阻止执行：当前处于编辑模式。");
+            return;
+        }
+
         if (parameter is not WorkflowItem workflow)
         {
             return;
@@ -447,13 +607,24 @@ public sealed class MainViewModel : ObservableObject
             }
 
             workflow.LastRunStatus = "执行失败";
-            SetStatus($"执行失败：{ex.Message}", "Error");
             AddLog($"执行失败：{workflow.WorkflowName}，{ex.Message}");
-            System.Windows.MessageBox.Show(
-                ex.Message,
-                "执行失败",
-                System.Windows.MessageBoxButton.OK,
-                System.Windows.MessageBoxImage.Error);
+            if (showFailureDialog)
+            {
+                // The modal dialog is the single user-facing failure notice.
+                // Do not duplicate the same long exception in the status card.
+                SetStatus("空闲", "Idle");
+                System.Windows.MessageBox.Show(
+                    ex.Message,
+                    "执行失败",
+                    System.Windows.MessageBoxButton.OK,
+                    System.Windows.MessageBoxImage.Error);
+            }
+            else
+            {
+                // Scheduled runs have no modal dialog, so retain a compact
+                // in-app status while the full diagnostics stay in the log.
+                SetStatus($"执行失败：{workflow.WorkflowName}", "Error");
+            }
         }
         finally
         {
@@ -497,18 +668,16 @@ public sealed class MainViewModel : ObservableObject
 
             SetStatus("当前没有正在执行的 workflow。", "Warning");
             AddLog("停止请求未找到活动的 RuntimeHost 进程。");
-            // Keep the stop request active while RunAsync unwinds. This covers the
-            // race where RuntimeHost already exited but stdout/stderr is still read.
+            // RuntimeHost may already have exited while RunAsync is still
+            // unwinding setup/cancellation. Never force the visible state to idle
+            // here: AsyncRelayCommand is still executing and doing so splits the
+            // UI state from the real command state, leaving every run button
+            // apparently idle but non-clickable. RunWorkflowAsync.finally is the
+            // single owner that releases IsRunning and the active workflow.
             if (IsRunning)
             {
-                if (_activeWorkflow is not null)
-                {
-                    _activeWorkflow.IsExecuting = false;
-                    _activeWorkflow.LastRunStatus = "已停止";
-                }
-                IsRunning = false;
-                SetStatus("RuntimeHost 已结束，界面已恢复。", "Warning");
-                AddLog("RuntimeHost 已结束，已解除执行状态。");
+                SetStatus("正在结束当前 workflow...", "Warning");
+                AddLog("RuntimeHost 已结束，正在等待执行任务完整退出。");
             }
             else
             {
@@ -580,6 +749,264 @@ public sealed class MainViewModel : ObservableObject
         IsRecentExpanded = false;
         SetRecentHeaderSelected(false);
         ClearRecentProjectSelection();
+    }
+
+    private void ShowAutomations()
+    {
+        ActiveView = ActiveView == "Automations" ? "Home" : "Automations";
+        IsRecentExpanded = false;
+        SetRecentHeaderSelected(false);
+        ClearRecentProjectSelection();
+        if (ActiveView == "Automations") LoadAutomationProjects();
+    }
+
+    private void ShowAutomationEditor()
+    {
+        AutomationValidationMessage = null;
+        LoadAutomationProjects();
+        ProjectPickerSearchText = null;
+        SelectedAutomationProject = null;
+        IsAutomationEditorVisible = true;
+    }
+
+    private void LoadAutomationProjects()
+    {
+        AutomationProjects.Clear();
+        AutomationValidationMessage = null;
+        if (string.IsNullOrWhiteSpace(SharedLibraryFolder) || !Directory.Exists(SharedLibraryFolder))
+        {
+            AutomationValidationMessage = "请先在设置中配置可访问的网络共享工作流目录。";
+            AutomationProjectView.Refresh();
+            return;
+        }
+
+        try
+        {
+            foreach (string projectFolder in Directory.EnumerateDirectories(SharedLibraryFolder)
+                         .OrderBy(GetFolderDisplayName, StringComparer.OrdinalIgnoreCase))
+            {
+                AutomationProjects.Add(new RecentProjectItem
+                {
+                    Name = GetFolderDisplayName(projectFolder),
+                    Path = projectFolder,
+                    IsSharedProject = true
+                });
+            }
+
+            bool schedulesMigrated = false;
+            foreach (ScheduledAutomation automation in Automations.Where(item => string.IsNullOrWhiteSpace(item.ProjectFolder)))
+            {
+                RecentProjectItem? project = AutomationProjects.FirstOrDefault(item =>
+                    string.Equals(item.Name, automation.ProjectName, StringComparison.OrdinalIgnoreCase));
+                if (project is null) continue;
+                automation.ProjectFolder = project.Path;
+                schedulesMigrated = true;
+            }
+            if (schedulesMigrated) _automationScheduleService.Save(Automations);
+        }
+        catch (Exception ex)
+        {
+            AutomationValidationMessage = "读取网络项目失败：" + ex.Message;
+        }
+
+        AutomationProjectView.Refresh();
+    }
+
+    private void AddAutomation()
+    {
+        AutomationValidationMessage = null;
+        if (SelectedAutomationProject is null)
+        {
+            AutomationValidationMessage = "请先搜索并选择一个项目。";
+            return;
+        }
+
+        WorkflowItem? firstWorkflow = GetFirstProjectWorkflow(SelectedAutomationProject.Path);
+        if (firstWorkflow is null)
+        {
+            AutomationValidationMessage = "该项目中没有可识别的工作流。";
+            return;
+        }
+
+        if (!firstWorkflow.CanRun)
+        {
+            AutomationValidationMessage = "该项目的第一个工作流当前不可执行：" + firstWorkflow.CompatibilityDetails;
+            return;
+        }
+
+        List<DayOfWeek> weekdays = GetSelectedWeekdays();
+        if (IsWeeklySchedule && weekdays.Count == 0)
+        {
+            AutomationValidationMessage = "每周执行至少需要选择一个星期。";
+            return;
+        }
+
+        ScheduledAutomation automation = new()
+        {
+            ProjectName = SelectedAutomationProject.Name,
+            ProjectFolder = SelectedAutomationProject.Path,
+            ScheduleType = IsMonthlySchedule ? "Monthly" : "Weekly",
+            Weekdays = IsWeeklySchedule ? weekdays : [],
+            DayOfMonth = IsMonthlySchedule ? AutomationDayOfMonth : null,
+            Hour = AutomationHour,
+            Minute = AutomationMinute
+        };
+        Automations.Add(automation);
+        _automationScheduleService.Save(Automations);
+        AutomationView.Refresh();
+        IsAutomationEditorVisible = false;
+        AddLog($"已添加定时任务：{automation.ProjectDisplay}，{automation.ScheduleText}");
+    }
+
+    private void DeleteAutomation(object? parameter)
+    {
+        if (parameter is not ScheduledAutomation automation) return;
+
+        MessageBoxResult result = MessageBox.Show(
+            $"确定删除定时任务“{automation.ProjectDisplay}”吗？",
+            "删除定时任务",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Question);
+        if (result != MessageBoxResult.Yes) return;
+
+        Automations.Remove(automation);
+        _automationScheduleService.Save(Automations);
+        AutomationView.Refresh();
+        AddLog($"已删除定时任务：{automation.ProjectDisplay}");
+    }
+
+    private List<DayOfWeek> GetSelectedWeekdays()
+    {
+        List<DayOfWeek> result = [];
+        if (Monday) result.Add(DayOfWeek.Monday);
+        if (Tuesday) result.Add(DayOfWeek.Tuesday);
+        if (Wednesday) result.Add(DayOfWeek.Wednesday);
+        if (Thursday) result.Add(DayOfWeek.Thursday);
+        if (Friday) result.Add(DayOfWeek.Friday);
+        if (Saturday) result.Add(DayOfWeek.Saturday);
+        if (Sunday) result.Add(DayOfWeek.Sunday);
+        return result;
+    }
+
+    private bool FilterAutomation(object item)
+    {
+        if (item is not ScheduledAutomation automation) return false;
+        if (string.IsNullOrWhiteSpace(AutomationSearchText)) return true;
+        string keyword = AutomationSearchText.Trim();
+        return Contains(automation.ProjectName, keyword)
+            || Contains(automation.ScheduleText, keyword);
+    }
+
+    private bool FilterAutomationProject(object item)
+    {
+        if (item is not RecentProjectItem project) return false;
+        if (string.IsNullOrWhiteSpace(ProjectPickerSearchText)) return true;
+        return Contains(project.Name, ProjectPickerSearchText.Trim());
+    }
+
+    private WorkflowItem? GetFirstProjectWorkflow(string? projectFolder)
+    {
+        if (string.IsNullOrWhiteSpace(projectFolder) || !Directory.Exists(projectFolder)) return null;
+        return _workflowScanner.Scan(projectFolder).Workflows
+            .OrderBy(item => item.WorkflowName, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(item => item.Filename, StringComparer.OrdinalIgnoreCase)
+            .FirstOrDefault();
+    }
+
+    private async void AutomationTimer_Tick(object? sender, EventArgs e)
+    {
+        if (IsRunning || !IsRuntimeMode) return;
+
+        DateTime now = DateTime.Now;
+        ScheduledAutomation? automation = Automations.FirstOrDefault(item =>
+            item.IsDue(now, TimeSpan.FromMinutes(10)));
+        if (automation is null) return;
+
+        if (AutomationProjects.Count == 0) LoadAutomationProjects();
+        if (string.IsNullOrWhiteSpace(automation.ProjectFolder))
+        {
+            automation.ProjectFolder = AutomationProjects.FirstOrDefault(item =>
+                string.Equals(item.Name, automation.ProjectName, StringComparison.OrdinalIgnoreCase))?.Path ?? string.Empty;
+        }
+
+        WorkflowItem? workflow = GetFirstProjectWorkflow(automation.ProjectFolder);
+        automation.LastRunAt = now;
+        if (workflow is null)
+        {
+            automation.LastRunStatus = "项目不可访问或没有工作流";
+            _automationScheduleService.Save(Automations);
+            AddLog($"定时任务未执行：{automation.ProjectDisplay} 不可访问或没有工作流。");
+            return;
+        }
+
+        automation.LastRunStatus = "执行中";
+        _automationScheduleService.Save(Automations);
+        AddLog($"定时任务触发：{automation.ProjectDisplay}，自动执行第一个工作流 {workflow.WorkflowName}");
+        await RunWorkflowAsync(workflow, showFailureDialog: false);
+        automation.LastRunStatus = workflow.LastRunStatus;
+        _automationScheduleService.Save(Automations);
+    }
+
+    public void Dispose()
+    {
+        _automationTimer.Stop();
+        _automationTimer.Tick -= AutomationTimer_Tick;
+    }
+
+    private void CheckBrowserAutomation()
+    {
+        BrowserAutomationCheckResult result = IsRuntimeMode
+            ? _chromeAutomationStatusService.CheckAndPrepare(_useBundledBrowser)
+            : _chromeAutomationStatusService.SwitchToEditMode();
+        BrowserAutomationStatus = result.Message;
+        AddLog("浏览器扩展检查：" + result.Message);
+    }
+
+    private void ApplyInitialWorkMode()
+    {
+        BrowserAutomationCheckResult result = IsRuntimeMode
+            ? _chromeAutomationStatusService.SwitchToRuntimeMode(_useBundledBrowser)
+            : _chromeAutomationStatusService.SwitchToEditMode();
+        BrowserAutomationStatus = result.Message;
+
+        // The run commands are intentionally disabled in edit mode. Make that
+        // state visible on the workflow page instead of leaving an ambiguous
+        // "idle" status that looks like a broken button.
+        if (IsEditMode)
+        {
+            SetStatus("编辑模式：运行和执行已禁用，请在设置中切换到运行模式。", "Warning");
+        }
+    }
+
+    private void SwitchWorkMode(WorkMode mode)
+    {
+        BrowserAutomationCheckResult result = mode == WorkMode.Runtime
+            ? _chromeAutomationStatusService.SwitchToRuntimeMode(_useBundledBrowser)
+            : _chromeAutomationStatusService.SwitchToEditMode();
+
+        BrowserAutomationStatus = result.Message;
+        AddLog("工作模式切换：" + result.Message);
+        if (!result.IsReady)
+        {
+            System.Windows.MessageBox.Show(
+                result.Message,
+                "工作模式切换失败",
+                System.Windows.MessageBoxButton.OK,
+                System.Windows.MessageBoxImage.Warning);
+            return;
+        }
+
+        _workMode = mode;
+        OnPropertyChanged(nameof(IsRuntimeMode));
+        OnPropertyChanged(nameof(IsEditMode));
+        OnPropertyChanged(nameof(WorkModeTitle));
+        OnPropertyChanged(nameof(WorkModeDescription));
+        RunFirstWorkflowCommand.RaiseCanExecuteChanged();
+        RunWorkflowCommand.RaiseCanExecuteChanged();
+        SwitchToRuntimeModeCommand.RaiseCanExecuteChanged();
+        SwitchToEditModeCommand.RaiseCanExecuteChanged();
+        SaveSettings();
+        SetStatus($"已切换到{WorkModeTitle}", "Idle");
     }
 
     private void SelectRecentProject(object? parameter)
@@ -717,6 +1144,7 @@ public sealed class MainViewModel : ObservableObject
     private void ClearProjectsForSharedLibraryChange()
     {
         Workflows.Clear();
+        AutomationProjects.Clear();
         Warnings.Clear();
         RecentProjects.Clear();
         ProjectFolder = null;
@@ -733,6 +1161,7 @@ public sealed class MainViewModel : ObservableObject
         _settings.SharedLibraryFolder = SharedLibraryFolder;
         _settings.RunHotkey = RunHotkey;
         _settings.StopHotkey = StopHotkey;
+        _settings.WorkMode = _workMode.ToString();
         _settingsService.Save(_settings);
     }
 

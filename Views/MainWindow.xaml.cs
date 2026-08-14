@@ -56,6 +56,8 @@ public partial class MainWindow : System.Windows.Window
             {
                 logs.CollectionChanged -= OnLogsCollectionChanged;
             }
+
+            ViewModel.Dispose();
         }
 
         UnregisterGlobalHotkeys();

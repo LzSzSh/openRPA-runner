@@ -2,6 +2,12 @@
 
 Maxwell 是一个面向 OpenRPA workflow 的独立桌面执行器。它直接读取已配置项目目录中的 workflow JSON，并由自带的 RuntimeHost 加载其中的 XAML 并执行；目标电脑不需要安装或启动 OpenRPA。
 
+2026-08-14 正式交接版的完整架构、功能、构建、发布、测试、风险和接手步骤见 [`docs/FINAL_HANDOFF_2026-08-14.md`](docs/FINAL_HANDOFF_2026-08-14.md)。正式包使用：
+
+```powershell
+.\publish-win-x64.ps1 -Mode Final
+```
+
 ## 当前实现
 
 - 沿用原有 .NET 8 WPF GUI。

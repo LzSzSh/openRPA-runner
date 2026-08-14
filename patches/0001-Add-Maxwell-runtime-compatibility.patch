@@ -1,0 +1,1280 @@
+From db3aff08cc2e6acf2e84256adcfb8b096f18d66c Mon Sep 17 00:00:00 2001
+From: LzSzSh <259045724+LzSzSh@users.noreply.github.com>
+Date: Fri, 14 Aug 2026 14:47:08 +0800
+Subject: [PATCH] Add Maxwell runtime compatibility
+
+---
+ OpenRPA.Forms/Activities/ShowNotification.cs  |  78 ++++----
+ OpenRPA.NM/Activities/ExecuteScript.cs        |   9 +-
+ OpenRPA.NM/Activities/GetTab.cs               |   8 +-
+ OpenRPA.NM/NMHook.cs                          | 120 +++++++++++--
+ OpenRPA.NM/NMSelector.cs                      |  13 ++
+ OpenRPA.NativeMessagingHost/Program.cs        |   3 +-
+ .../addon2/background.js                      |  15 +-
+ OpenRPA.NativeMessagingHost/addon2/content.js |   4 +-
+ .../chromemanifest.json                       |  16 +-
+ .../Activities/CompressArchive.cs             |  10 +-
+ OpenRPA.Utilities/Activities/ExpandArchive.cs |  10 +-
+ OpenRPA.Utilities/Activities/StartProcess.cs  |  40 ++++-
+ OpenRPA.Windows/Activities/GetElement.cs      | 167 ++++++++++++++----
+ OpenRPA.Windows/MaxwellChromeCompatibility.cs | 158 +++++++++++++++++
+ OpenRPA.Windows/WindowsSelector.cs            |  57 +++++-
+ OpenRPA.Windows/WindowsSelectorItem.cs        |  54 ++++++
+ OpenRPA/Activities/CopyClipboard.cs           |   9 +-
+ 17 files changed, 641 insertions(+), 130 deletions(-)
+ create mode 100644 OpenRPA.Windows/MaxwellChromeCompatibility.cs
+
+diff --git a/OpenRPA.Forms/Activities/ShowNotification.cs b/OpenRPA.Forms/Activities/ShowNotification.cs
+index 9dbab2d3..48fef9e5 100644
+--- a/OpenRPA.Forms/Activities/ShowNotification.cs
++++ b/OpenRPA.Forms/Activities/ShowNotification.cs
+@@ -1,22 +1,16 @@
+ ﻿using System;
+ using System.Activities;
++using System.Diagnostics;
++using System.IO;
++using System.Text;
+ using OpenRPA.Interfaces;
+ using System.Activities.Presentation.PropertyEditing;
+-using System.Collections.Generic;
+ using System.ComponentModel;
+-using System.Diagnostics;
+ using System.Linq;
+-using System.Text;
+-using System.Threading.Tasks;
+ using System.Data;
+ 
+ namespace OpenRPA.Forms.Activities
+ {
+-    using ToastNotifications.Messages;
+-    using ToastNotifications;
+-    using ToastNotifications.Lifetime;
+-    using ToastNotifications.Position;
+-
+     [System.ComponentModel.Designer(typeof(ShowNotificationDesigner), typeof(System.ComponentModel.Design.IDesigner))]
+     [System.Drawing.ToolboxBitmap(typeof(ResFinder2), "Resources.toolbox.shownotification.png")]
+     [LocalizedToolboxTooltip("activity_shownotification_tooltip", typeof(Resources.strings))]
+@@ -24,57 +18,45 @@ namespace OpenRPA.Forms.Activities
+     [LocalizedHelpURL("activity_shownotification_helpurl", typeof(Resources.strings))]
+     public class ShowNotification : CodeActivity
+     {
+-        public static bool FirstRun = true;
+         public ShowNotification()
+         {
+             NotificationType = "Information";
+-            if(FirstRun)
+-            {
+-                var dict = new System.Windows.ResourceDictionary();
+-                var baseDir = AppDomain.CurrentDomain.BaseDirectory;
+-                System.Windows.Application.Current.Resources.MergedDictionaries.Add(
+-                    new System.Windows.ResourceDictionary { Source = new Uri("pack://application:,,,/ToastNotifications.Messages;component/Themes/Default.xaml") });
+-                FirstRun = false;
+-            }
+         }
++
+         [RequiredArgument, Category("Input")]
+         public InArgument<string> Message { get; set; }
++
+         [RequiredArgument]
+         [System.ComponentModel.Category("Misc")]
+         [Editor(typeof(SelectNotificationTypeEditor), typeof(System.Activities.Presentation.PropertyEditing.ExtendedPropertyValueEditor))]
+         public InArgument<string> NotificationType { get; set; }
+-        public static Notifier notifier;
++
+         protected override void Execute(CodeActivityContext context)
+         {
+             var message = Message.Get(context);
+-            //var title = Title.Get(context);
+-            //var duration = Duration.Get(context);
+-            var notificationType = NotificationType.Get(context);
+-            if(notifier==null)
++            var notificationType = NotificationType.Get(context) ?? "Information";
++            var notificationHost = Environment.GetEnvironmentVariable("MAXWELL_NOTIFICATION_HOST");
++            if (string.IsNullOrWhiteSpace(notificationHost))
+             {
+-                notifier = new Notifier(cfg =>
+-                {
+-                    //cfg.PositionProvider = new WindowPositionProvider(
+-                    //    parentWindow: GenericTools.mainWindow,
+-                    //    corner: Corner.TopRight,
+-                    //    offsetX: 10,
+-                    //    offsetY: 10);
+-                    cfg.PositionProvider = new PrimaryScreenPositionProvider(
+-           corner: Corner.BottomRight,
+-           offsetX: 10,
+-           offsetY: 10);
+-                    cfg.LifetimeSupervisor = new TimeAndCountBasedLifetimeSupervisor(
+-                        notificationLifetime: TimeSpan.FromSeconds(3),
+-                        maximumNotificationCount: MaximumNotificationCount.FromCount(5));
+-
+-                    cfg.Dispatcher = System.Windows.Application.Current.Dispatcher;
+-                });
++                notificationHost = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Maxwell.NotificationHost.exe");
++            }
++            if (!File.Exists(notificationHost))
++            {
++                throw new FileNotFoundException("Unable to locate Maxwell.NotificationHost.exe", notificationHost);
+             }
+-            if (notificationType == "Information") notifier.ShowInformation(message);
+-            if (notificationType == "Success") notifier.ShowSuccess(message);
+-            if (notificationType == "Warning") notifier.ShowWarning(message);
+-            if (notificationType == "Error") notifier.ShowError(message);
++
++            var messageBytes = Encoding.UTF8.GetBytes(message ?? string.Empty);
++            var startInfo = new ProcessStartInfo
++            {
++                FileName = notificationHost,
++                Arguments = "\"" + notificationType + "\" \"" + Convert.ToBase64String(messageBytes) + "\"",
++                UseShellExecute = false,
++                CreateNoWindow = true,
++                WindowStyle = ProcessWindowStyle.Hidden
++            };
++            Process.Start(startInfo);
+         }
++
+         class SelectNotificationTypeEditor : CustomSelectEditor
+         {
+             public override DataTable options
+@@ -92,6 +74,7 @@ namespace OpenRPA.Forms.Activities
+                 }
+             }
+         }
++
+         public new string DisplayName
+         {
+             get
+@@ -100,7 +83,10 @@ namespace OpenRPA.Forms.Activities
+                 if (displayName == this.GetType().Name)
+                 {
+                     var displayNameAttribute = this.GetType().GetCustomAttributes(typeof(DisplayNameAttribute), true).FirstOrDefault() as DisplayNameAttribute;
+-                    if (displayNameAttribute != null) displayName = displayNameAttribute.DisplayName;
++                    if (displayNameAttribute != null)
++                    {
++                        displayName = displayNameAttribute.DisplayName;
++                    }
+                 }
+                 return displayName;
+             }
+@@ -110,4 +96,4 @@ namespace OpenRPA.Forms.Activities
+             }
+         }
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/OpenRPA.NM/Activities/ExecuteScript.cs b/OpenRPA.NM/Activities/ExecuteScript.cs
+index 182b3dbe..20ed5c3c 100644
+--- a/OpenRPA.NM/Activities/ExecuteScript.cs
++++ b/OpenRPA.NM/Activities/ExecuteScript.cs
+@@ -36,7 +36,12 @@ namespace OpenRPA.NM
+             script = Interfaces.Selector.Selector.ReplaceVariables(script, context.DataContext);
+             if (browser != "chrome" && browser != "ff" && browser != "edge") browser = "chrome";
+             var result = NMHook.ExecuteScript(browser, frameid, -1, script, timeout);
+-            if (result == null) { result = "[]"; }
++            if (result == null)
++            {
++                throw new InvalidOperationException(
++                    "Browser script was not acknowledged by the OpenRPA extension. " +
++                    "Ensure the browser extension and Native Messaging Host are installed, enabled, and connected.");
++            }
+             var results = JsonConvert.DeserializeObject<object[]>(result.ToString());
+             if (results != null && results.Length > 0) { Result.Set(context, results[0]); } else { Result.Set(context, null); }
+             Results.Set(context, results);
+@@ -65,4 +70,4 @@ namespace OpenRPA.NM
+         }
+ 
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/OpenRPA.NM/Activities/GetTab.cs b/OpenRPA.NM/Activities/GetTab.cs
+index 2ee7f455..319a009f 100644
+--- a/OpenRPA.NM/Activities/GetTab.cs
++++ b/OpenRPA.NM/Activities/GetTab.cs
+@@ -28,13 +28,9 @@ namespace OpenRPA.NM
+         public OutArgument<NativeMessagingMessageTab[]> Results { get; set; }
+         protected override void Execute(NativeActivityContext context)
+         {
+-            if (!NMHook.connected)
+-            {
+-                Result.Set(context, null);
+-                return;
+-            }
+             var browser = Browser.Get(context);
+             if (browser != "chrome" && browser != "ff" && browser != "edge") browser = "chrome";
++            NMHook.EnsureBrowserConnected(browser);
+             if (browser == "edge")
+             {
+                 if(Result != null && !Result.GetIsEmpty())
+@@ -92,4 +88,4 @@ namespace OpenRPA.NM
+         }
+ 
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/OpenRPA.NM/NMHook.cs b/OpenRPA.NM/NMHook.cs
+index e30a2c46..02246404 100644
+--- a/OpenRPA.NM/NMHook.cs
++++ b/OpenRPA.NM/NMHook.cs
+@@ -9,6 +9,7 @@ using System.Text;
+ using System.Threading.Tasks;
+ using Newtonsoft.Json.Linq;
+ using System.Text.RegularExpressions;
++using System.IO;
+ 
+ namespace OpenRPA.NM
+ {
+@@ -20,7 +21,9 @@ namespace OpenRPA.NM
+         private static NamedPipeClientAsync<NativeMessagingMessage> chromepipe = null;
+         private static NamedPipeClientAsync<NativeMessagingMessage> ffpipe = null;
+         private static NamedPipeClientAsync<NativeMessagingMessage> edgepipe = null;
+-        public const string PIPE_NAME = "openrpa_nativebridge";
++        // Maxwell must not attach to the browser bridge of an installed
++        // OpenRPA desktop client in the same Windows session.
++        public const string PIPE_NAME = "maxwell_nativebridge";
+         public static bool chromeconnected
+         {
+             get
+@@ -53,6 +56,19 @@ namespace OpenRPA.NM
+                 return false;
+             }
+         }
++        public static bool IsBrowserConnected(string browser)
++        {
++            if (string.Equals(browser, "edge", StringComparison.OrdinalIgnoreCase)) return edgeconnected;
++            if (string.Equals(browser, "ff", StringComparison.OrdinalIgnoreCase)) return ffconnected;
++            return chromeconnected;
++        }
++        public static void EnsureBrowserConnected(string browser)
++        {
++            if (IsBrowserConnected(browser)) return;
++            throw new InvalidOperationException(
++                "OpenRPA browser automation is not connected for " + browser +
++                ". Ensure the browser extension and Native Messaging Host are installed, enabled, and connected.");
++        }
+         public static void checkForPipes(bool chrome, bool ff, bool edge)
+         {
+             //registreChromeNativeMessagingHost(false);
+@@ -876,14 +892,7 @@ namespace OpenRPA.NM
+                 }
+                 if (!chromeconnected || tabcount == 0)
+                 {
+-                    if (string.IsNullOrEmpty(profilepath))
+-                    {
+-                        System.Diagnostics.Process.Start("chrome.exe", "\"" + url + "\"");
+-                    }
+-                    else
+-                    {
+-                        System.Diagnostics.Process.Start("chrome.exe", "--user-data-dir=\"" + profilepath + "\"  \"" + url + "\"");
+-                    }
++                    StartChrome(url, profilepath);
+ 
+                     var sw = new System.Diagnostics.Stopwatch();
+                     sw.Start();
+@@ -897,6 +906,7 @@ namespace OpenRPA.NM
+                 {
+                     chromeopenurl(url, newtab);
+                 }
++                EnsureBrowserConnected("chrome");
+             }
+             else if (browser == "edge")
+             {
+@@ -939,6 +949,7 @@ namespace OpenRPA.NM
+                 {
+                     edgeopenurl(url, newtab);
+                 }
++                EnsureBrowserConnected("edge");
+             }
+             else
+             {
+@@ -984,8 +995,79 @@ namespace OpenRPA.NM
+                 {
+                     ffopenurl(url, newtab);
+                 }
++                EnsureBrowserConnected("ff");
++            }
++        }
++
++        // Maxwell ships a portable Chromium browser inside RuntimeHost's runtime
++        // directory. Prefer that browser explicitly so a workflow with
++        // Browser="chrome" does not depend on the user's installed Chrome or on
++        // Windows' default-browser setting. The normal system chrome.exe lookup
++        // remains only as a compatibility fallback for a non-Maxwell host.
++        private static void StartChrome(string url, string profilepath)
++        {
++            string maxwellProfile = Environment.GetEnvironmentVariable("MAXWELL_BROWSER_PROFILE");
++            string effectiveProfile = string.IsNullOrWhiteSpace(maxwellProfile) ? profilepath : maxwellProfile;
++            string extensionDirectory = Environment.GetEnvironmentVariable("MAXWELL_BROWSER_EXTENSION");
++            // RuntimeHost normally passes this location through its child
++            // environment. Some legacy workflow execution paths construct a
++            // separate AppDomain and do not retain that variable. The private
++            // Maxwell extension is deliberately mirrored to this fixed local
++            // directory, so use it as a deterministic fallback instead of
++            // silently launching Chrome without the automation extension.
++            if (string.IsNullOrWhiteSpace(extensionDirectory))
++            {
++                extensionDirectory = Path.Combine(
++                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
++                    "Maxwell", "OpenRpaExtension");
++            }
++            string extensionArgument = string.IsNullOrWhiteSpace(extensionDirectory) || !Directory.Exists(extensionDirectory)
++                ? string.Empty
++                : " --disable-extensions-except=\"" + extensionDirectory + "\" --load-extension=\"" + extensionDirectory + "\"";
++            string arguments = string.IsNullOrEmpty(effectiveProfile)
++                ? "\"" + url + "\""
++                : "--user-data-dir=\"" + effectiveProfile + "\"  \"" + url + "\"";
++            arguments = "--no-first-run --no-default-browser-check --disable-default-apps --allow-file-access-from-files" + extensionArgument + " " + arguments;
++
++            try
++            {
++                string diagnosticDirectory = Path.Combine(
++                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Maxwell");
++                Directory.CreateDirectory(diagnosticDirectory);
++                File.AppendAllText(Path.Combine(diagnosticDirectory, "browser-launch.log"),
++                    DateTime.Now.ToString("O") + " extension=" + extensionDirectory +
++                    "; exists=" + Directory.Exists(extensionDirectory) +
++                    "; arguments=" + arguments + Environment.NewLine);
++            }
++            catch { }
++
++            // RuntimeHost may itself live on an SMB share.  Its chrome-portable
++            // directory is only the distribution seed; launching Chrome from
++            // there makes Chromium child processes fail silently on some VMs.
++            // MaxwellRuntimeRunner has already mirrored the browser locally,
++            // so always prefer that explicit local path.
++            string configuredChrome = Environment.GetEnvironmentVariable("MAXWELL_BUNDLED_CHROME");
++            if (!string.IsNullOrEmpty(configuredChrome) && File.Exists(configuredChrome))
++            {
++                System.Diagnostics.Process.Start(configuredChrome, arguments);
++                return;
++            }
++
++            string runtimeDirectory = AppDomain.CurrentDomain.BaseDirectory;
++            string[] bundledCandidates = new[]
++            {
++                Path.Combine(runtimeDirectory, "chrome-portable", "Chrome", "chrome.exe"),
++                Path.Combine(runtimeDirectory, "chrome-portable", "chrome.exe")
++            };
+ 
++            string bundledChrome = bundledCandidates.FirstOrDefault(File.Exists);
++            if (!string.IsNullOrEmpty(bundledChrome))
++            {
++                System.Diagnostics.Process.Start(bundledChrome, arguments);
++                return;
+             }
++
++            System.Diagnostics.Process.Start("chrome.exe", arguments);
+         }
+         internal static void ffopenurl(string url, bool forceNew)
+         {
+@@ -994,6 +1076,10 @@ namespace OpenRPA.NM
+                 NativeMessagingMessage message = new NativeMessagingMessage("openurl", PluginConfig.debug_console_output, PluginConfig.unique_xpath_ids) { data = url };
+                 message.xPath = forceNew.ToString().ToLower();
+                 var result = ffpipe.Message(message, TimeSpan.FromSeconds(2));
++                if (result == null)
++                {
++                    throw new InvalidOperationException("The OpenRPA Firefox extension did not acknowledge the open URL request.");
++                }
+                 if (result != null && result.tab != null) WaitForTab(result.tab.id, result.browser, TimeSpan.FromSeconds(5));
+             }
+         }
+@@ -1005,6 +1091,10 @@ namespace OpenRPA.NM
+                 message.xPath = forceNew.ToString().ToLower();
+                 // Log.Verbose("send openurl");
+                 var result = chromepipe.Message(message, TimeSpan.FromSeconds(2));
++                if (result == null)
++                {
++                    throw new InvalidOperationException("The OpenRPA Chrome extension did not acknowledge the open URL request.");
++                }
+                 // Log.Verbose("openurl reply, wait for tab #" + result.tab.id + " windowId " + result.tab.windowId);
+                 if (result != null && result.tab != null) WaitForTab(result.tab.id, result.browser, TimeSpan.FromSeconds(5));
+             }
+@@ -1016,6 +1106,10 @@ namespace OpenRPA.NM
+                 NativeMessagingMessage message = new NativeMessagingMessage("openurl", PluginConfig.debug_console_output, PluginConfig.unique_xpath_ids) { data = url };
+                 message.xPath = forceNew.ToString().ToLower();
+                 var result = edgepipe.Message(message, TimeSpan.FromSeconds(2));
++                if (result == null)
++                {
++                    throw new InvalidOperationException("The OpenRPA Edge extension did not acknowledge the open URL request.");
++                }
+                 if (result != null && result.tab != null) WaitForTab(result.tab.id, result.browser, TimeSpan.FromSeconds(5));
+             }
+         }
+@@ -1113,14 +1207,14 @@ namespace OpenRPA.NM
+                     if (!hklmExists(@"SOFTWARE\Google")) return;
+                     if (!hklmExists(@"SOFTWARE\Google\Chrome")) return;
+                     if (!hklmExists(@"SOFTWARE\Google\Chrome\NativeMessagingHosts")) hklmCreate(@"SOFTWARE\Google\Chrome\NativeMessagingHosts");
+-                    if (!hklmExists(@"SOFTWARE\Google\Chrome\NativeMessagingHosts\com.openrpa.msg")) hklmCreate(@"SOFTWARE\Google\Chrome\NativeMessagingHosts\com.openrpa.msg");
++                    if (!hklmExists(@"SOFTWARE\Google\Chrome\NativeMessagingHosts\com.maxwell.openrpa.msg")) hklmCreate(@"SOFTWARE\Google\Chrome\NativeMessagingHosts\com.maxwell.openrpa.msg");
+                 }
+                 else
+                 {
+                     if (!hkcuExists(@"SOFTWARE\Google")) return;
+                     if (!hkcuExists(@"SOFTWARE\Google\Chrome")) return;
+                     if (!hkcuExists(@"SOFTWARE\Google\Chrome\NativeMessagingHosts")) hkcuCreate(@"SOFTWARE\Google\Chrome\NativeMessagingHosts");
+-                    if (!hkcuExists(@"SOFTWARE\Google\Chrome\NativeMessagingHosts\com.openrpa.msg")) hkcuCreate(@"SOFTWARE\Google\Chrome\NativeMessagingHosts\com.openrpa.msg");
++                    if (!hkcuExists(@"SOFTWARE\Google\Chrome\NativeMessagingHosts\com.maxwell.openrpa.msg")) hkcuCreate(@"SOFTWARE\Google\Chrome\NativeMessagingHosts\com.maxwell.openrpa.msg");
+                 }
+                 var basepath = Interfaces.Extensions.PluginsDirectory;
+                 var filename = System.IO.Path.Combine(basepath, "chromemanifest.json");
+@@ -1137,8 +1231,8 @@ namespace OpenRPA.NM
+                 {
+                 }
+                 Microsoft.Win32.RegistryKey Chrome = null;
+-                if (localMachine) Chrome = Microsoft.Win32.Registry.LocalMachine.OpenSubKey("Software\\Google\\Chrome\\NativeMessagingHosts\\com.openrpa.msg", true);
+-                if (!localMachine) Chrome = Microsoft.Win32.Registry.CurrentUser.OpenSubKey("Software\\Google\\Chrome\\NativeMessagingHosts\\com.openrpa.msg", true);
++                if (localMachine) Chrome = Microsoft.Win32.Registry.LocalMachine.OpenSubKey("Software\\Google\\Chrome\\NativeMessagingHosts\\com.maxwell.openrpa.msg", true);
++                if (!localMachine) Chrome = Microsoft.Win32.Registry.CurrentUser.OpenSubKey("Software\\Google\\Chrome\\NativeMessagingHosts\\com.maxwell.openrpa.msg", true);
+                 Chrome.SetValue("", filename);
+ 
+ 
+diff --git a/OpenRPA.NM/NMSelector.cs b/OpenRPA.NM/NMSelector.cs
+index 07697465..44820dde 100644
+--- a/OpenRPA.NM/NMSelector.cs
++++ b/OpenRPA.NM/NMSelector.cs
+@@ -161,7 +161,20 @@ namespace OpenRPA.NM
+                 getelement.tabid = ((NMElement)fromElement).message.tabid;
+                 getelement.frameId = ((NMElement)fromElement).message.frameId;
+             }
++            if (string.IsNullOrWhiteSpace(browser) && fromNMElement != null)
++            {
++                browser = fromNMElement.browser;
++                getelement.browser = browser;
++            }
++            if (browser != "chrome" && browser != "ff" && browser != "edge") browser = "chrome";
++            getelement.browser = browser;
++            NMHook.EnsureBrowserConnected(browser);
+             subresult = NMHook.sendMessageResult(getelement, PluginConfig.protocol_timeout);
++            if (subresult == null)
++            {
++                throw new InvalidOperationException(
++                    "The OpenRPA " + browser + " extension did not acknowledge the element lookup request.");
++            }
+             if (subresult != null)
+                 if (subresult.results != null)
+                     foreach (var b in subresult.results)
+diff --git a/OpenRPA.NativeMessagingHost/Program.cs b/OpenRPA.NativeMessagingHost/Program.cs
+index e205a34e..844ae753 100644
+--- a/OpenRPA.NativeMessagingHost/Program.cs
++++ b/OpenRPA.NativeMessagingHost/Program.cs
+@@ -36,7 +36,8 @@ namespace OpenRPA.NativeMessagingHost
+         static Timer aTimer = null;
+         static messagehandler handler = null;
+         public static NamedPipeServer<NativeMessagingMessage> pipe { get; set; }
+-        public const string PIPE_NAME = "openrpa_nativebridge";
++        // Maxwell owns this bridge; keep it separate from installed OpenRPA.
++        public const string PIPE_NAME = "maxwell_nativebridge";
+         private static void Server_OnReceivedMessage(NamedPipeConnection<NativeMessagingMessage, NativeMessagingMessage> connection, NativeMessagingMessage message)
+         {
+             try
+diff --git a/OpenRPA.NativeMessagingHost/addon2/background.js b/OpenRPA.NativeMessagingHost/addon2/background.js
+index 955481e1..6ba4bbee 100644
+--- a/OpenRPA.NativeMessagingHost/addon2/background.js
++++ b/OpenRPA.NativeMessagingHost/addon2/background.js
+@@ -1,5 +1,5 @@
+ var port = null;
+-var portname = 'com.openrpa.msg';
++var portname = 'com.maxwell.openrpa.msg';
+ var base_debug = false;
+ function BaseOnPortMessage(message) {
+     if (port == null) {
+@@ -70,12 +70,16 @@ function Baseconnect() {
+ 
+ }
+ Baseconnect();
++// MV3 service workers are suspended when idle.  Start the native bridge on
++// Chrome startup and reconnect when a Maxwell content script wakes us.
++chrome.runtime.onStartup.addListener(Baseconnect);
++chrome.runtime.onInstalled.addListener(Baseconnect);
+ 
+ 
+ console.log('openrpa extension begin');
+ //var port;
+ var openrpautil_script = '';
+-var portname = 'com.openrpa.msg';
++var portname = 'com.maxwell.openrpa.msg';
+ var lastwindowId = 1;
+ var openrpadebug = false;
+ 
+@@ -108,7 +112,7 @@ var isBlink = (isChrome || isOpera) && !!window.CSS;
+ /* The above code is based on code from: https://stackoverflow.com/a/9851769/3773011 */
+ 
+ // var port = null;
+-var portname = 'com.openrpa.msg';
++var portname = 'com.maxwell.openrpa.msg';
+ 
+ async function SendToTab(windowId, message) {
+     try {
+@@ -839,6 +843,11 @@ chrome.tabs.onUpdated.addListener(tabsOnUpdated);
+ chrome.tabs.onActivated.addListener(tabsOnActivated);
+ chrome.downloads.onChanged.addListener(downloadsOnChanged);
+ chrome.runtime.onMessage.addListener((msg, sender, fnResponse) => {
++    if (msg && msg.functionName === "maxwell_wake") {
++        Baseconnect();
++        fnResponse({ ok: true });
++        return;
++    }
+     if (msg === "loadscript") {
+         if (openrpautil_script !== null && openrpautil_script !== undefined && openrpautil_script !== '') {
+             console.debug("send openrpautil to tab");
+diff --git a/OpenRPA.NativeMessagingHost/addon2/content.js b/OpenRPA.NativeMessagingHost/addon2/content.js
+index e146c07c..357eec0b 100644
+--- a/OpenRPA.NativeMessagingHost/addon2/content.js
++++ b/OpenRPA.NativeMessagingHost/addon2/content.js
+@@ -1,5 +1,8 @@
+ document.openrpadebug = false;
+ document.openrpauniquexpathids = ['ng-model', 'ng-reflect-name']; // aria-label
++// A workflow can navigate and locate an element before a MV3 worker has been
++// started by user input.  Wake it as soon as this document is injected.
++try { chrome.runtime.sendMessage({ functionName: "maxwell_wake" }); } catch (e) { }
+ function inIframe() {
+     var result = true;
+     try {
+@@ -1977,4 +1980,3 @@ if (true == false) {
+     Object.keys(gBase64).forEach(k => gBase64.Base64[k] = gBase64[k]);
+     return gBase64;
+ }));
+-
+diff --git a/OpenRPA.NativeMessagingHost/chromemanifest.json b/OpenRPA.NativeMessagingHost/chromemanifest.json
+index 18e47bb7..ef2c4dc4 100644
+--- a/OpenRPA.NativeMessagingHost/chromemanifest.json
++++ b/OpenRPA.NativeMessagingHost/chromemanifest.json
+@@ -1,21 +1,9 @@
+ {
+-  "name": "com.openrpa.msg",
++  "name": "com.maxwell.openrpa.msg",
+   "description": "OpenRPA messaging host",
+   "path": "REPLACEPATH\\OpenRPA.NativeMessagingHost.exe",
+   "type": "stdio",
+   "allowed_origins": [
+-    "chrome-extension://cjjehhadngahcdkbkeopdlmjedddkedh/",
+-    "chrome-extension://meoobaegjobjgfnlfndegpnpdmonbnbe/",
+-    "chrome-extension://eglkkjllkdooicijpbolleoemogkagbp/",
+-    "chrome-extension://inhepbikmioclaolbahmnieiinemlmfp/",
+-    "chrome-extension://ijabkdeadobnodfdgilkjhbploikblbg/",
+-    "chrome-extension://cfhdojbkjhnklbpkdaibdccddilifddb/",
+-    "chrome-extension://hpnihnhlcnfejboocnckgchjdofeaphe/",
+-    "chrome-extension://ebbbjigjoglkolagcfjdnginmfknnmmg/",
+-    "chrome-extension://ennlpladclaaogmhlddghpneajafmgln/",
+-    "chrome-extension://fdpjjldghhdjaakadnkiepghjdfjllmg/",
+-    "chrome-extension://hkjbghcanbbkhldlfkddbiiooadknael/",
+-    "chrome-extension://igkhnjpllpckiodjdkoiailagikebloa/",
+-    "chrome-extension://bnmpdfndpadhamjmmkgkhgkmplfancbi/"
++    "chrome-extension://hpnihnhlcnfejboocnckgchjdofeaphe/"
+   ]
+ }
+diff --git a/OpenRPA.Utilities/Activities/CompressArchive.cs b/OpenRPA.Utilities/Activities/CompressArchive.cs
+index 42e19203..ef0bc256 100644
+--- a/OpenRPA.Utilities/Activities/CompressArchive.cs
++++ b/OpenRPA.Utilities/Activities/CompressArchive.cs
+@@ -40,6 +40,14 @@ namespace OpenRPA.Utilities
+             filename = Environment.ExpandEnvironmentVariables(filename);
+             var path = Path.Get(context);
+             path = Environment.ExpandEnvironmentVariables(path);
++            if (string.IsNullOrWhiteSpace(path))
++            {
++                throw new ArgumentException("Archive source path cannot be empty.", "Path");
++            }
++            if (string.IsNullOrWhiteSpace(filename))
++            {
++                throw new ArgumentException("Archive filename cannot be empty.", "Filename");
++            }
+             if(!string.IsNullOrEmpty(path) && !string.IsNullOrEmpty(filename))
+             {
+                 if(System.IO.File.Exists(filename)) {
+@@ -80,4 +88,4 @@ namespace OpenRPA.Utilities
+         }
+     }
+ 
+-}
+\ No newline at end of file
++}
+diff --git a/OpenRPA.Utilities/Activities/ExpandArchive.cs b/OpenRPA.Utilities/Activities/ExpandArchive.cs
+index 49e755ea..78cc0403 100644
+--- a/OpenRPA.Utilities/Activities/ExpandArchive.cs
++++ b/OpenRPA.Utilities/Activities/ExpandArchive.cs
+@@ -36,6 +36,14 @@ namespace OpenRPA.Utilities
+             filename = Environment.ExpandEnvironmentVariables(filename);
+             var path = Path.Get(context);
+             path = Environment.ExpandEnvironmentVariables(path);
++            if (string.IsNullOrWhiteSpace(path))
++            {
++                throw new ArgumentException("Archive destination path cannot be empty.", "Path");
++            }
++            if (string.IsNullOrWhiteSpace(filename))
++            {
++                throw new ArgumentException("Archive filename cannot be empty.", "Filename");
++            }
+             if(!string.IsNullOrEmpty(path) && !string.IsNullOrEmpty(filename))
+             {
+                 if(string.IsNullOrEmpty(encoding))
+@@ -86,4 +94,4 @@ namespace OpenRPA.Utilities
+             }
+         }
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/OpenRPA.Utilities/Activities/StartProcess.cs b/OpenRPA.Utilities/Activities/StartProcess.cs
+index d835e2a6..64e0a44c 100644
+--- a/OpenRPA.Utilities/Activities/StartProcess.cs
++++ b/OpenRPA.Utilities/Activities/StartProcess.cs
+@@ -15,6 +15,7 @@ using System.Data;
+ using Microsoft.VisualBasic.FileIO;
+ using System.Text.RegularExpressions;
+ using System.Windows;
++using System.IO;
+ 
+ namespace OpenRPA.Utilities
+ {
+@@ -42,6 +43,24 @@ namespace OpenRPA.Utilities
+             var waitforexittimeout = WaitForExitTimeout.Get(context);
+             ProcessStartInfo startInfo = new ProcessStartInfo();
+             filename = Environment.ExpandEnvironmentVariables(filename);
++
++            // Maxwell runs workflows in an isolated Chromium profile. Route
++            // browser launches through Maxwell.ChromeLauncher, never directly
++            // to Chrome: the launcher owns the UIA accessibility switch and
++            // waits for the Chrome UIA document tree before this activity can
++            // return to the next Windows.GetElement.
++            string maxwellChrome = Environment.GetEnvironmentVariable("MAXWELL_BUNDLED_CHROME");
++            string maxwellLauncher = Environment.GetEnvironmentVariable("MAXWELL_CHROME_LAUNCHER");
++            if (TryGetBrowserUrl(filename, out string browserUrl) &&
++                !string.IsNullOrWhiteSpace(maxwellChrome) && File.Exists(maxwellChrome) &&
++                !string.IsNullOrWhiteSpace(maxwellLauncher) && File.Exists(maxwellLauncher))
++            {
++                filename = maxwellLauncher;
++                arguments = (string.IsNullOrWhiteSpace(browserUrl) ? string.Empty : "\"" + browserUrl + "\"") +
++                    (string.IsNullOrWhiteSpace(arguments) ? string.Empty : " " + arguments);
++                workingdirectory = Path.GetDirectoryName(maxwellLauncher);
++            }
++
+             startInfo.FileName = filename;
+             startInfo.Arguments = arguments;
+             startInfo.WorkingDirectory = workingdirectory;
+@@ -58,7 +77,26 @@ namespace OpenRPA.Utilities
+             }
+         }
+ 
++        private static bool TryGetBrowserUrl(string filename, out string browserUrl)
++        {
++            browserUrl = null;
++            if (string.IsNullOrWhiteSpace(filename)) return false;
++
++            string target = filename.Trim().Trim('\"');
++            if (Uri.TryCreate(target, UriKind.Absolute, out Uri uri) &&
++                (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps))
++            {
++                browserUrl = target;
++                return true;
++            }
++
++            string name = Path.GetFileName(target).Trim();
++            string normalizedName = Path.GetFileNameWithoutExtension(name).Trim();
++            string[] browserNames = { "chrome", "google chrome", "chromium", "chromium-browser", "msedge", "microsoft edge", "edge", "firefox", "brave", "opera" };
++            return browserNames.Any(browserName => string.Equals(normalizedName, browserName, StringComparison.OrdinalIgnoreCase));
++        }
++
+     }
+ 
+ 
+-}
+\ No newline at end of file
++}
+diff --git a/OpenRPA.Windows/Activities/GetElement.cs b/OpenRPA.Windows/Activities/GetElement.cs
+index e1830112..abff5d8e 100644
+--- a/OpenRPA.Windows/Activities/GetElement.cs
++++ b/OpenRPA.Windows/Activities/GetElement.cs
+@@ -54,6 +54,18 @@ namespace OpenRPA.Windows
+             var selector = Selector.Get(context);
+             selector = OpenRPA.Interfaces.Selector.Selector.ReplaceVariables(selector, context.DataContext);
+             var sel = new WindowsSelector(selector);
++            var maxwellChromeSelector = MaxwellChromeCompatibility.IsChromeSelector(sel);
++            var maxwellActivity = string.IsNullOrWhiteSpace(DisplayName) ? GetType().Name : DisplayName;
++            var maxwellAutomationId = MaxwellChromeCompatibility.GetTargetAutomationId(sel);
++            if (maxwellChromeSelector)
++            {
++                // A Chrome navigation can leave valid-looking but obsolete UIA
++                // elements in the five-minute Windows selector cache. Scope the
++                // invalidation to Maxwell Chrome selectors so desktop apps keep
++                // OpenRPA's normal cache performance.
++                ClearMaxwellChromeCache("activity-start");
++                Log.Output("MAXWELL_UIA activity=" + maxwellActivity + "; automation-id=" + (maxwellAutomationId ?? "<none>"));
++            }
+             var timeout = Timeout.Get(context);
+             var maxresults = MaxResults.Get(context);
+             var minresults = MinResults.Get(context);
+@@ -82,22 +94,26 @@ namespace OpenRPA.Windows
+                     Log.Warning("Timeout for on of your Windows.GetElements is above 5 minutes, was this the intention ? calculated value " + timeout.ToString());
+                 }
+             }
+-            do
++            if (maxwellChromeSelector && PluginConfig.get_elements_in_different_thread)
+             {
+-                if (ClearCache != null && ClearCache.Get(context))
++                // The legacy background STA lookup is retained as a short probe,
++                // but its FlaUI objects are never handed to the workflow. The
++                // actual UIElement used by Value/Click/Body is rebound on the
++                // Maxwell WPF dispatcher below.
++                int attempt = 0;
++                do
+                 {
+-                    Log.Selector(string.Format("Windows.GetElement::Clearing windows element cache {0:mm\\:ss\\.fff}", sw.Elapsed));
+-                    WindowsSelectorItem.ClearCache();
+-                }
+-                if (PluginConfig.get_elements_in_different_thread)
+-                {
+-                    elements = OpenRPA.AutomationHelper.RunSTAThread<UIElement[]>(() =>
++                    attempt++;
++                    var firstPassStopwatch = Stopwatch.StartNew();
++                    var remaining = timeout - sw.Elapsed;
++                    if (remaining <= TimeSpan.Zero) break;
++                    var probeTimeout = remaining < PluginConfig.search_timeout ? remaining : PluginConfig.search_timeout;
++                    var firstPassCount = OpenRPA.AutomationHelper.RunSTAThread<int>(() =>
+                     {
+                         try
+                         {
+-
+-                            Log.Selector(string.Format("Windows.GetElement::GetElementsWithuiSelector in non UI thread {0:mm\\:ss\\.fff}", sw.Elapsed));
+-                            return WindowsSelector.GetElementsWithuiSelector(sel, from, maxresults, ext);
++                            Log.Selector(string.Format("Windows.GetElement::ProbeElementsWithuiSelector in non UI thread {0:mm\\:ss\\.fff}", sw.Elapsed));
++                            return WindowsSelector.ProbeElementsWithuiSelector(sel, from, maxresults);
+                         }
+                         catch (System.Threading.ThreadAbortException)
+                         {
+@@ -106,37 +122,104 @@ namespace OpenRPA.Windows
+                         {
+                             Log.Error(ex.ToString());
+                         }
+-                        return new UIElement[] { };
+-                    }, PluginConfig.search_timeout).Result;
+-                }
+-                else
++                        return 0;
++                    }, probeTimeout).Result;
++                    Log.Output("MAXWELL_UIA activity=" + maxwellActivity + "; attempt=" + attempt + "; firstPassCount=" + firstPassCount + "; firstPassMilliseconds=" + firstPassStopwatch.ElapsedMilliseconds);
++
++                    if (firstPassCount > 0)
++                    {
++                        // The probe populated the static selector cache using a
++                        // different apartment. Clear only Chrome cache entries
++                        // before rebinding on the Dispatcher.
++                        ClearMaxwellChromeCache("before-ui-thread-rebind");
++                        var secondPassMissAfterFirstPassSuccess = false;
++                        var rebindAttempt = 0;
++                        do
++                        {
++                            rebindAttempt++;
++                            var secondPassStopwatch = Stopwatch.StartNew();
++                            try
++                            {
++                                // RuntimeHost installs AutomationHelper.syncContext
++                                // as the WPF DispatcherSynchronizationContext. This
++                                // creates the final UIA objects in the apartment that
++                                // later executes the activity Body.
++                                elements = OpenRPA.AutomationHelper.Send(() =>
++                                    WindowsSelector.GetElementsWithuiSelector(sel, from, maxresults, ext));
++                            }
++                            catch (Exception ex)
++                            {
++                                elements = new UIElement[] { };
++                                Log.Output("MAXWELL_UIA failure-stage=cross-thread-rebind; exception=" + ex.GetType().Name + "; hresult=" + ex.HResult + "; message=" + ex.Message);
++                            }
++                            var secondPassCount = elements == null ? 0 : elements.Length;
++                            Log.Output("MAXWELL_UIA activity=" + maxwellActivity + "; attempt=" + attempt + "; rebindAttempt=" + rebindAttempt + "; secondPassCount=" + secondPassCount + "; secondPassMilliseconds=" + secondPassStopwatch.ElapsedMilliseconds);
++                            if (secondPassCount > 0) break;
++
++                            if (!secondPassMissAfterFirstPassSuccess)
++                            {
++                                secondPassMissAfterFirstPassSuccess = true;
++                                Log.Output("MAXWELL_UIA second-pass-overwrite-prevented=true; firstPassCount=" + firstPassCount + "; secondPassCount=0");
++                            }
++                            if (sw.Elapsed >= timeout) break;
++                            System.Threading.Thread.Sleep(100);
++                            ClearMaxwellChromeCache("rebind-retry");
++                        } while (sw.Elapsed < timeout);
++                        break;
++                    }
++
++                    Log.Selector(string.Format("Windows.GetElement::Probe found no elements {0:mm\\:ss\\.fff}", sw.Elapsed));
++                    failcounter++;
++                    if (failcounter > 2) ClearMaxwellChromeCache("probe-retry");
++                    if (sw.Elapsed < timeout) System.Threading.Thread.Sleep(100);
++                } while (sw.Elapsed < timeout);
++                if (elements == null) elements = new UIElement[] { };
++            }
++            else
++            {
++                do
+                 {
+-                    Log.Selector(string.Format("Windows.GetElement::GetElementsWithuiSelector using UI thread {0:mm\\:ss\\.fff}", sw.Elapsed));
+-                    elements = WindowsSelector.GetElementsWithuiSelector(sel, from, maxresults, ext);
+-                    if (elements == null || elements.Length == 0)
++                    if (ClearCache != null && ClearCache.Get(context))
++                    {
++                        Log.Selector(string.Format("Windows.GetElement::Clearing windows element cache {0:mm\\:ss\\.fff}", sw.Elapsed));
++                        WindowsSelectorItem.ClearCache();
++                    }
++                    if (PluginConfig.get_elements_in_different_thread)
+                     {
++                        elements = OpenRPA.AutomationHelper.RunSTAThread<UIElement[]>(() =>
++                        {
++                            try
++                            {
++                                Log.Selector(string.Format("Windows.GetElement::GetElementsWithuiSelector in non UI thread {0:mm\\:ss\\.fff}", sw.Elapsed));
++                                return WindowsSelector.GetElementsWithuiSelector(sel, from, maxresults, ext);
++                            }
++                            catch (System.Threading.ThreadAbortException) { }
++                            catch (Exception ex) { Log.Error(ex.ToString()); }
++                            return new UIElement[] { };
++                        }, PluginConfig.search_timeout).Result;
++                    }
++                    else
++                    {
++                        Log.Selector(string.Format("Windows.GetElement::GetElementsWithuiSelector using UI thread {0:mm\\:ss\\.fff}", sw.Elapsed));
+                         elements = WindowsSelector.GetElementsWithuiSelector(sel, from, maxresults, ext);
++                        if (elements == null || elements.Length == 0)
++                        {
++                            elements = WindowsSelector.GetElementsWithuiSelector(sel, from, maxresults, ext);
++                        }
+                     }
+-                }
+-                //elements = WindowsSelector.GetElementsWithuiSelector(sel, from, maxresults);
+-                if (elements == null)
+-                {
+-                    elements = new UIElement[] { };
+-                }
+-                if (elements.Length == 0)
+-                {
+-                    Log.Selector(string.Format("Windows.GetElement::Found no elements {0:mm\\:ss\\.fff}", sw.Elapsed));
+-                    failcounter++;
+-                }
+-                if (failcounter > 2)
++                    if (elements == null) elements = new UIElement[] { };
++                    if (elements.Length == 0)
++                    {
++                        Log.Selector(string.Format("Windows.GetElement::Found no elements {0:mm\\:ss\\.fff}", sw.Elapsed));
++                        failcounter++;
++                    }
++                    if (failcounter > 2) WindowsSelectorItem.ClearCache();
++                } while (elements != null && elements.Length == 0 && sw.Elapsed < timeout);
++                if (PluginConfig.get_elements_in_different_thread && elements.Length > 0)
+                 {
+-                    WindowsSelectorItem.ClearCache();
++                    // Legacy behavior for the normal OpenRPA designer/runtime.
++                    elements = WindowsSelector.GetElementsWithuiSelector(sel, from, maxresults, ext);
+                 }
+-            } while (elements != null && elements.Length == 0 && sw.Elapsed < timeout);
+-            if (PluginConfig.get_elements_in_different_thread && elements.Length > 0)
+-            {
+-                // Get them again, we need the COM objects to be loaded in the UI thread
+-                elements = WindowsSelector.GetElementsWithuiSelector(sel, from, maxresults, ext);
+             }
+             context.SetValue(Elements, elements);
+ 
+@@ -145,6 +228,10 @@ namespace OpenRPA.Windows
+             context.SetValue(_lastelements, elements);
+             if ((elements.Length + lastelements.Length) < minresults)
+             {
++                if (maxwellChromeSelector)
++                {
++                    Log.Output("MAXWELL_UIA failure-stage=target-element; activity=" + maxwellActivity + "; elapsed=" + sw.Elapsed);
++                }
+                 Log.Selector(string.Format("Windows.GetElement::Failed locating " + minresults + " item(s) {0:mm\\:ss\\.fff}", sw.Elapsed));
+                 throw new ElementNotFoundException("Failed locating " + minresults + " item(s)");
+             }
+@@ -164,6 +251,7 @@ namespace OpenRPA.Windows
+                 context.SetValue(_elements, _enum);
+                 context.SetValue(_sw, sw);
+                 Log.Selector(string.Format("Windows.GetElement::end:: call ScheduleAction: {0:mm\\:ss\\.fff}", sw.Elapsed));
++                if (maxwellChromeSelector) Log.Output("MAXWELL_UIA result=found; elapsed=" + sw.Elapsed);
+                 IncIndex(context);
+                 SetTotal(context, elements.Length);
+                 context.ScheduleAction<UIElement>(Body, _enum.Current, OnBodyComplete);
+@@ -173,6 +261,11 @@ namespace OpenRPA.Windows
+                 Log.Selector(string.Format("Windows.GetElement:end {0:mm\\:ss\\.fff}", sw.Elapsed));
+             }
+         }
++        private static void ClearMaxwellChromeCache(string reason)
++        {
++            var removed = WindowsSelectorItem.ClearCacheForProcessName("chrome");
++            Log.Output("MAXWELL_UIA cache-cleared=chrome-selector; reason=" + reason + "; entries=" + removed);
++        }
+         private void OnBodyComplete(NativeActivityContext context, ActivityInstance completedInstance)
+         {
+             IEnumerator<UIElement> _enum = _elements.Get(context);
+@@ -248,4 +341,4 @@ namespace OpenRPA.Windows
+             }
+         }
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/OpenRPA.Windows/MaxwellChromeCompatibility.cs b/OpenRPA.Windows/MaxwellChromeCompatibility.cs
+new file mode 100644
+index 00000000..d16a37b8
+--- /dev/null
++++ b/OpenRPA.Windows/MaxwellChromeCompatibility.cs
+@@ -0,0 +1,158 @@
++using OpenRPA.Interfaces;
++using OpenRPA.Interfaces.Selector;
++using FlaUI.Core.AutomationElements;
++using System;
++using System.Collections.Generic;
++using System.Linq;
++
++namespace OpenRPA.Windows
++{
++    /// <summary>
++    /// Runtime-only compatibility for workflows executed by Maxwell's bundled
++    /// Chrome. It never changes selectors saved by the OpenRPA designer.
++    /// </summary>
++    public static class MaxwellChromeCompatibility
++    {
++        private const string EnvironmentVariable = "MAXWELL_WINDOWS_UIA_COMPATIBILITY";
++
++        public static bool IsChromeSelector(WindowsSelector selector)
++        {
++            return selector != null && selector.Count > 0 &&
++                IsEnabled() &&
++                string.Equals(selector[0].processname(), "chrome", StringComparison.OrdinalIgnoreCase);
++        }
++
++        public static void NormalizeSelector(WindowsSelector selector)
++        {
++            if (!IsChromeSelector(selector)) return;
++
++            foreach (SelectorItem item in selector)
++            {
++                SelectorItemProperty className = item.Properties.FirstOrDefault(property =>
++                    property.Enabled && string.Equals(property.Name, "ClassName", StringComparison.OrdinalIgnoreCase));
++                if (className == null || !string.Equals(className.Value, "Chrome_WidgetWin_1", StringComparison.OrdinalIgnoreCase)) continue;
++
++                SelectorItemProperty title = item.Properties.FirstOrDefault(property =>
++                    property.Enabled && string.Equals(property.Name, "Name", StringComparison.OrdinalIgnoreCase));
++                if (title == null) continue;
++
++                title.Enabled = false;
++                Log.Output("MAXWELL_UIA ignored volatile Chrome window title: " + title.Value);
++            }
++        }
++
++        public static bool IsChromeSelector(string selector)
++        {
++            if (!IsEnabled() || string.IsNullOrWhiteSpace(selector)) return false;
++            try { return IsChromeSelector(new WindowsSelector(selector)); }
++            catch { return false; }
++        }
++
++        public static string GetTargetAutomationId(WindowsSelector selector)
++        {
++            if (!IsChromeSelector(selector)) return null;
++            for (var index = selector.Count - 1; index >= 0; index--)
++            {
++                var property = FindEnabledProperty(selector[index], "AutomationId");
++                if (property != null && !string.IsNullOrWhiteSpace(property.Value)) return property.Value;
++            }
++            return null;
++        }
++
++        /// <summary>
++        /// Temporarily relaxes only volatile web attributes on the final selector
++        /// layer. The caller must dispose the returned scope immediately after its
++        /// one fallback lookup so the recorded selector remains unchanged.
++        /// </summary>
++        public static IDisposable BeginStableTargetFallback(WindowsSelectorItem item)
++        {
++            if (!IsEnabled() || item == null) return null;
++            var automationId = FindEnabledProperty(item, "AutomationId");
++            if (automationId == null || string.IsNullOrWhiteSpace(automationId.Value)) return null;
++
++            var states = new List<PropertyState>();
++            foreach (var property in item.Properties.Where(property =>
++                string.Equals(property.Name, "Name", StringComparison.OrdinalIgnoreCase) ||
++                string.Equals(property.Name, "ClassName", StringComparison.OrdinalIgnoreCase) ||
++                string.Equals(property.Name, "IndexInParent", StringComparison.OrdinalIgnoreCase)))
++            {
++                states.Add(new PropertyState(property, property.Enabled));
++                property.Enabled = false;
++            }
++            return new PropertyRestoreScope(states);
++        }
++
++        public static bool MatchesStableTarget(WindowsSelectorItem recorded, AutomationElement candidate)
++        {
++            if (recorded == null || candidate == null) return false;
++            var automationId = FindEnabledProperty(recorded, "AutomationId");
++            if (automationId == null || string.IsNullOrWhiteSpace(automationId.Value)) return false;
++
++            try
++            {
++                if (!string.Equals(candidate.Properties.AutomationId.ValueOrDefault, automationId.Value, StringComparison.Ordinal)) return false;
++
++                var controlType = FindEnabledProperty(recorded, "ControlType");
++                if (controlType != null && !string.Equals(candidate.Properties.ControlType.ValueOrDefault.ToString(), controlType.Value, StringComparison.OrdinalIgnoreCase)) return false;
++
++                var frameworkId = FindEnabledProperty(recorded, "FrameworkId");
++                if (frameworkId != null && !string.Equals(candidate.Properties.FrameworkId.ValueOrDefault, frameworkId.Value, StringComparison.OrdinalIgnoreCase)) return false;
++
++                // A web framework can append/remove individual CSS classes during
++                // rendering. Keep a class constraint, but accept a stable shared
++                // token after the exact selector has already failed.
++                var className = recorded.Properties.FirstOrDefault(property => string.Equals(property.Name, "ClassName", StringComparison.OrdinalIgnoreCase));
++                if (className != null && !string.IsNullOrWhiteSpace(className.Value))
++                {
++                    var expectedTokens = TokenizeClassName(className.Value);
++                    var actualTokens = TokenizeClassName(candidate.Properties.ClassName.ValueOrDefault);
++                    if (expectedTokens.Count > 0 && !expectedTokens.Any(token => actualTokens.Contains(token))) return false;
++                }
++                return true;
++            }
++            catch (Exception ex)
++            {
++                Log.Output("MAXWELL_UIA fallback-match-exception=" + ex.GetType().Name + "; message=" + ex.Message);
++                return false;
++            }
++        }
++
++        private static SelectorItemProperty FindEnabledProperty(SelectorItem item, string name)
++        {
++            return item == null ? null : item.Properties.FirstOrDefault(property =>
++                property.Enabled && string.Equals(property.Name, name, StringComparison.OrdinalIgnoreCase));
++        }
++
++        private static HashSet<string> TokenizeClassName(string value)
++        {
++            return new HashSet<string>((value ?? string.Empty)
++                .Split(new[] { ' ', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries), StringComparer.OrdinalIgnoreCase);
++        }
++
++        private sealed class PropertyState
++        {
++            public PropertyState(SelectorItemProperty property, bool enabled)
++            {
++                Property = property;
++                Enabled = enabled;
++            }
++            public SelectorItemProperty Property { get; private set; }
++            public bool Enabled { get; private set; }
++        }
++
++        private sealed class PropertyRestoreScope : IDisposable
++        {
++            private readonly IEnumerable<PropertyState> states;
++            public PropertyRestoreScope(IEnumerable<PropertyState> states) { this.states = states; }
++            public void Dispose()
++            {
++                foreach (var state in states) state.Property.Enabled = state.Enabled;
++            }
++        }
++
++        private static bool IsEnabled()
++        {
++            return string.Equals(Environment.GetEnvironmentVariable(EnvironmentVariable), "1", StringComparison.Ordinal);
++        }
++    }
++}
+diff --git a/OpenRPA.Windows/WindowsSelector.cs b/OpenRPA.Windows/WindowsSelector.cs
+index f38fcd11..3890a34f 100644
+--- a/OpenRPA.Windows/WindowsSelector.cs
++++ b/OpenRPA.Windows/WindowsSelector.cs
+@@ -498,7 +498,7 @@ namespace OpenRPA.Windows
+             }
+             return _current.ToArray();
+         }
+-        public static UIElement[] GetElementsWithuiSelector(WindowsSelector selector, IElement fromElement, int maxresults, WindowsCacheExtension ext)
++        public static UIElement[] GetElementsWithuiSelector(WindowsSelector selector, IElement fromElement, int maxresults, WindowsCacheExtension ext, AutomationBase automationOverride = null)
+         {
+             TimeSpan timeout = TimeSpan.FromMilliseconds(5000);
+             timeout = TimeSpan.FromMilliseconds(20000);
+@@ -508,6 +508,12 @@ namespace OpenRPA.Windows
+ 
+             UIElement _fromElement = fromElement as UIElement;
+             // var selectors = selector.Where(x => x.Enabled == true && x.Selector == null).ToList();
++            // Maxwell launches an isolated portable Chrome. Its window title
++            // changes during redirects, while the recorded selector often
++            // contains the full title captured by the OpenRPA designer. Keep
++            // the actual web-element properties intact, but drop that one
++            // volatile window-layer condition only for Maxwell Chrome runs.
++            MaxwellChromeCompatibility.NormalizeSelector(selector);
+             var selectors = selector.ToList();
+             AutomationElement startfrom = null;
+             if (_fromElement != null) startfrom = _fromElement.RawElement as AutomationElement;
+@@ -515,8 +521,8 @@ namespace OpenRPA.Windows
+ 
+             var _current = new List<UIElement>();
+             // var automation = AutomationUtil.getAutomation();
+-            AutomationBase automation = null;
+-            if (ext != null) automation = ext.automation;
++            AutomationBase automation = automationOverride;
++            if (automation == null && ext != null) automation = ext.automation;
+             if (automation == null) automation = AutomationUtil.getAutomation();
+ 
+             UIElement[] result = null;
+@@ -547,6 +553,38 @@ namespace OpenRPA.Windows
+                     //_current = current.ToList();
+                 }
+                 _current = GetElementsWithuiSelectorItem(i, automation, sel, current, maxresults, i == (selectors.Count - 1), search_descendants).ToList();
++                if (MaxwellChromeCompatibility.IsChromeSelector(selector))
++                {
++                    Log.Output("MAXWELL_UIA selector-stage=" + i + "; exact-candidates=" + current.Length + "; exact-matches=" + _current.Count);
++                }
++                if (MaxwellChromeCompatibility.IsChromeSelector(selector) &&
++                    i == selectors.Count - 1 && _current.Count == 0 && current.Length > 0)
++                {
++                    IDisposable restore = MaxwellChromeCompatibility.BeginStableTargetFallback(sel);
++                    if (restore != null)
++                    {
++                        try
++                        {
++                            var fallbackSearchLimit = Math.Max(maxresults + 1, 2);
++                            var fallbackCandidates = GetElementsWithuiSelectorItem(i, automation, sel, current, fallbackSearchLimit, true, search_descendants)
++                                .Where(candidate => MaxwellChromeCompatibility.MatchesStableTarget(sel, candidate.RawElement as AutomationElement))
++                                .ToArray();
++                            if (fallbackCandidates.Length > maxresults)
++                            {
++                                Log.Output("MAXWELL_UIA fallback-ambiguous=true; selector-stage=" + i + "; candidates=" + fallbackCandidates.Length);
++                            }
++                            else
++                            {
++                                _current = fallbackCandidates.ToList();
++                            }
++                            Log.Output("MAXWELL_UIA selector-stage=" + i + "; fallback-matches=" + _current.Count);
++                        }
++                        finally
++                        {
++                            restore.Dispose();
++                        }
++                    }
++                }
+                 if (i == 0 && _current.Count == 0)
+                 {
+                     _current = current.ToList();
+@@ -608,5 +646,18 @@ namespace OpenRPA.Windows
+             return result;
+ 
+         }
++
++        /// <summary>
++        /// A short-lived STA probe used only to establish that a Chrome selector is
++        /// visible. It never returns its UIA/COM objects to another apartment.
++        /// </summary>
++        public static int ProbeElementsWithuiSelector(WindowsSelector selector, IElement fromElement, int maxresults)
++        {
++            using (var automation = AutomationUtil.getAutomation())
++            {
++                var elements = GetElementsWithuiSelector(selector, fromElement, maxresults, null, automation);
++                return elements == null ? 0 : elements.Length;
++            }
++        }
+     }
+ }
+diff --git a/OpenRPA.Windows/WindowsSelectorItem.cs b/OpenRPA.Windows/WindowsSelectorItem.cs
+index a366a394..54c69575 100644
+--- a/OpenRPA.Windows/WindowsSelectorItem.cs
++++ b/OpenRPA.Windows/WindowsSelectorItem.cs
+@@ -409,6 +409,60 @@ namespace OpenRPA.Windows
+                 }
+             }
+         }
++        /// <summary>
++        /// Removes only cache entries that are rooted in, or contain results from,
++        /// a specific desktop process. Maxwell uses this for its isolated Chrome
++        /// instance so a browser navigation cannot leave cross-apartment UIA
++        /// objects behind without flushing caches for Excel and other applications.
++        /// </summary>
++        public static int ClearCacheForProcessName(string processName)
++        {
++            if (string.IsNullOrWhiteSpace(processName)) return 0;
++            var removed = 0;
++            if (!System.Threading.Monitor.TryEnter(cache_lock, 1000)) return removed;
++            try
++            {
++                var items = MatchCache.Where(item => CacheItemContainsProcess(item, processName)).ToList();
++                foreach (var item in items)
++                {
++                    MatchCache.Remove(item);
++                    removed++;
++                }
++            }
++            finally
++            {
++                System.Threading.Monitor.Exit(cache_lock);
++            }
++            return removed;
++        }
++        private static bool CacheItemContainsProcess(MatchCacheItem item, string processName)
++        {
++            if (item == null) return false;
++            if (ElementHasProcessName(item.Root, processName)) return true;
++            if (item.Result == null) return false;
++            foreach (var element in item.Result)
++            {
++                if (ElementHasProcessName(element, processName)) return true;
++            }
++            return false;
++        }
++        private static bool ElementHasProcessName(AutomationElement element, string processName)
++        {
++            if (element == null) return false;
++            try
++            {
++                var processId = element.Properties.ProcessId.ValueOrDefault;
++                if (processId <= 0) return false;
++                using (var process = System.Diagnostics.Process.GetProcessById(processId))
++                {
++                    return string.Equals(process.ProcessName, processName, StringComparison.OrdinalIgnoreCase);
++                }
++            }
++            catch
++            {
++                return false;
++            }
++        }
+         public static void AddToCache(AutomationElement root, int ident, string Conditions, AutomationElement[] Result)
+         {
+             if (!PluginConfig.enable_cache) return;
+diff --git a/OpenRPA/Activities/CopyClipboard.cs b/OpenRPA/Activities/CopyClipboard.cs
+index b9888e80..fcc78dbd 100644
+--- a/OpenRPA/Activities/CopyClipboard.cs
++++ b/OpenRPA/Activities/CopyClipboard.cs
+@@ -28,6 +28,7 @@ namespace OpenRPA.Activities
+             string text = "";
+             System.Windows.Media.Imaging.BitmapSource image = null;
+             int counter = 0;
++            Exception lastError = null;
+             while (string.IsNullOrEmpty(text) && image == null)
+             {
+                 counter++;
+@@ -67,14 +68,20 @@ namespace OpenRPA.Activities
+                     staThread.SetApartmentState(System.Threading.ApartmentState.STA);
+                     staThread.Start();
+                     staThread.Join();
++                    if (threadEx != null) throw threadEx;
+                 }
+                 catch (Exception ex)
+                 {
++                    lastError = ex;
+                     Log.Debug(ex.Message);
+                     System.Threading.Thread.Sleep(250);
+                 }
+                 if (counter == 3) break;
+             }
++            if (string.IsNullOrEmpty(text) && image == null && lastError != null)
++            {
++                throw new InvalidOperationException("Failed reading the Windows clipboard after 3 attempts.", lastError);
++            }
+             context.SetValue(StringResult, text);
+             context.SetValue(ImageResult, image);
+         }
+@@ -97,4 +104,4 @@ namespace OpenRPA.Activities
+             }
+         }
+     }
+-}
+\ No newline at end of file
++}
+-- 
+2.55.0.windows.2
+

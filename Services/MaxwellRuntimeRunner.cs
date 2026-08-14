@@ -11,6 +11,7 @@ public sealed class MaxwellRuntimeRunner
     private readonly object _syncRoot = new();
     private Process? _currentProcess;
     private CancellationTokenSource? _currentRunCancellation;
+    private bool _runReserved;
 
     public async Task<MaxwellRuntimeRunResult> RunAsync(
         WorkflowItem workflow,
@@ -18,20 +19,30 @@ public sealed class MaxwellRuntimeRunner
         CancellationToken cancellationToken = default)
     {
         using CancellationTokenSource runCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        Process process;
         lock (_syncRoot)
         {
-            if (_currentProcess is not null)
+            if (_runReserved)
             {
                 throw new InvalidOperationException("已有 workflow 正在执行。请先等待其完成或停止。");
             }
 
+            // Reserve the runner before any potentially slow network/runtime
+            // preparation. Stop can then cancel a run that has not launched its
+            // RuntimeHost yet, and a second invocation cannot race through setup.
+            _runReserved = true;
+            _currentRunCancellation = runCancellation;
+        }
+
+        Process? process = null;
+        string resultFile = Path.Combine(Path.GetTempPath(), "maxwell-runtime-" + Guid.NewGuid().ToString("N") + ".json");
+        try
+        {
             ProcessStartInfo startInfo = new()
             {
                 FileName = ResolveRuntimeHostPath(),
                 UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
+                RedirectStandardOutput = false,
+                RedirectStandardError = false,
                 CreateNoWindow = true,
                 WorkingDirectory = Path.GetDirectoryName(workflow.SourceFile) ?? AppContext.BaseDirectory
             };
@@ -41,6 +52,12 @@ public sealed class MaxwellRuntimeRunner
             startInfo.ArgumentList.Add(ResolveRuntimeDirectory());
             startInfo.ArgumentList.Add("--workflow-root");
             startInfo.ArgumentList.Add(ResolveWorkflowRoot(workflow));
+            startInfo.ArgumentList.Add("--result-file");
+            startInfo.ArgumentList.Add(resultFile);
+            // NotificationHost is intentionally long-lived across workflows,
+            // but it belongs to this Maxwell GUI instance. Child processes
+            // inherit this value and use it to exit when Maxwell closes.
+            startInfo.Environment["MAXWELL_OWNER_PROCESS_ID"] = Environment.ProcessId.ToString();
 
             // Native Messaging is needed by both distribution variants. The
             // bundled-browser package ships a profile with the extension
@@ -64,33 +81,54 @@ public sealed class MaxwellRuntimeRunner
                     string existingPath = startInfo.Environment.TryGetValue("PATH", out string? currentPath)
                         ? currentPath ?? string.Empty
                         : Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
-                    startInfo.Environment["PATH"] = bundledChromeDirectory + Path.PathSeparator + existingPath;
+                    string launcherDirectory = Path.Combine(ResolveRuntimeDirectory(), "browser-launcher");
+                    string launcherExecutable = Path.Combine(launcherDirectory, "chrome.exe");
+                    // OpenRPA's StartProcess activity receives the workflow's original
+                    // Filename="chrome". Put a tiny launcher ahead of Chromium on PATH
+                    // so that command consistently receives Maxwell's isolated profile.
+                    // This preserves the workflow XAML and avoids raw-XAML rewriting.
+                    startInfo.Environment["PATH"] =
+                        (File.Exists(launcherExecutable) ? launcherDirectory + Path.PathSeparator : string.Empty) +
+                        bundledChromeDirectory + Path.PathSeparator + existingPath;
+                    // Chrome++ owns the versioned chrome.dll engine and must
+                    // remain the entry point. The isolated profile already
+                    // contains the official OpenRPA extension. Do not also
+                    // side-load Maxwell's private build: both use the same
+                    // extension id, and Chrome disables the installed copy
+                    // when the two sources collide, leaving Native Messaging
+                    // with no active extension.
                     startInfo.Environment["MAXWELL_BUNDLED_CHROME"] = Path.Combine(bundledChromeDirectory, "chrome.exe");
+                    startInfo.Environment["MAXWELL_CHROME_LAUNCHER"] = launcherExecutable;
                     startInfo.Environment["MAXWELL_BROWSER_PROFILE"] =
                         BundledChromeLocator.EnsureLocalBundledBrowserProfileDirectory();
+                    // Enable only the Chromium/UIA compatibility path in the
+                    // OpenRPA.Windows runtime. Desktop selectors designed for
+                    // Excel, file dialogs and other applications retain their
+                    // normal OpenRPA behavior.
+                    startInfo.Environment["MAXWELL_WINDOWS_UIA_COMPATIBILITY"] = "1";
+                    startInfo.Environment["MAXWELL_BROWSER_DIAGNOSTICS"] = Path.Combine(
+                        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                        "Maxwell",
+                        "Diagnostics");
                 }
             }
 
+            runCancellation.Token.ThrowIfCancellationRequested();
             process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
-            _currentProcess = process;
-            _currentRunCancellation = runCancellation;
-        }
-
-        try
-        {
-            if (!process.Start()) throw new InvalidOperationException("无法启动 Maxwell RuntimeHost。");
-            Task<string> stdoutTask = process.StandardOutput.ReadToEndAsync(runCancellation.Token);
-            Task<string> stderrTask = process.StandardError.ReadToEndAsync(runCancellation.Token);
+            lock (_syncRoot)
+            {
+                runCancellation.Token.ThrowIfCancellationRequested();
+                if (!process.Start()) throw new InvalidOperationException("无法启动 Maxwell RuntimeHost。");
+                _currentProcess = process;
+            }
             await process.WaitForExitAsync(runCancellation.Token);
-            string stdout = await stdoutTask;
-            string stderr = await stderrTask;
-
-            RuntimeHostResponse? response = TryParseFinalResponse(stdout);
+            string resultJson = File.Exists(resultFile)
+                ? await File.ReadAllTextAsync(resultFile, CancellationToken.None)
+                : string.Empty;
+            RuntimeHostResponse? response = TryParseFinalResponse(resultJson);
             if (response is null)
             {
-                string output = string.Join(Environment.NewLine, new[] { stdout, stderr }.Where(value => !string.IsNullOrWhiteSpace(value))).Trim();
-                throw new InvalidOperationException("Maxwell RuntimeHost 未返回有效结果。" +
-                    (string.IsNullOrWhiteSpace(output) ? string.Empty : Environment.NewLine + output));
+                throw new InvalidOperationException("Maxwell RuntimeHost 已结束，但未返回有效结果。");
             }
 
             if (!response.success || !string.Equals(response.action, "completed", StringComparison.OrdinalIgnoreCase))
@@ -106,14 +144,17 @@ public sealed class MaxwellRuntimeRunner
         }
         finally
         {
-            process.Dispose();
+            process?.Dispose();
+            try { if (File.Exists(resultFile)) File.Delete(resultFile); } catch { }
             lock (_syncRoot)
             {
                 if (ReferenceEquals(_currentProcess, process))
                 {
                     _currentProcess = null;
-                    _currentRunCancellation = null;
                 }
+                if (ReferenceEquals(_currentRunCancellation, runCancellation))
+                    _currentRunCancellation = null;
+                _runReserved = false;
             }
         }
     }

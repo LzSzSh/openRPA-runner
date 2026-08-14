@@ -14,6 +14,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Xaml;
 using Microsoft.Win32;
+using OpenRPA.Interfaces;
 
 namespace Maxwell.RuntimeHost
 {
@@ -30,8 +31,31 @@ namespace Maxwell.RuntimeHost
             "System.Xaml", "System.Xml", "System.Xml.Linq", "UIAutomationClient", "UIAutomationTypes",
             "WindowsBase", "PresentationCore", "PresentationFramework"
         };
+        private static readonly Regex DefaultChromeSelectorPath = new Regex(
+            @"(?<prefix>&quot;filename&quot;\s*:\s*&quot;)(?:(?:%ProgramFiles(?:\(x86\))?%)|(?:C:\\\\Program Files(?: \(x86\))?))\\\\Google\\\\Chrome\\\\Application\\\\chrome\.exe(?<suffix>&quot;)",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+        private static readonly Regex SelectorAttribute = new Regex(
+            @"(?<prefix>\bSelector="")(?<value>[^""]*)(?<suffix>"")",
+            RegexOptions.CultureInvariant | RegexOptions.Compiled);
+        private static readonly Regex StartProcessTag = new Regex(
+            @"<(?:\w+:)?StartProcess\b[^>]*?/?>",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+        private static readonly Regex FilenameAttribute = new Regex(
+            @"\bFilename=""(?<value>[^""]*)""",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+        private static readonly Regex ArgumentsAttribute = new Regex(
+            @"\bArguments=""(?<value>[^""]*)""",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+        private static readonly Regex InvokeOpenRpaTag = new Regex(
+            @"<(?:\w+:)?InvokeOpenRPA\b[^>]*\bworkflow=""(?<value>[^""]+)""[^>]*/?>",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+        private const int ChromeConnectionTimeoutMilliseconds = 30000;
+        private const string OpenRpaChromeExtensionId = "hpnihnhlcnfejboocnckgchjdofeaphe";
+        private const string MaxwellNativeHostName = "com.maxwell.openrpa.msg";
+        private const string OfficialNativeHostName = "com.openrpa.msg";
 
         private static string _runtimeDirectory;
+        private static string _resultFile;
         private static WorkflowApplication _application;
         private static RuntimeResponse _result;
 
@@ -43,7 +67,9 @@ namespace Maxwell.RuntimeHost
             {
                 EnsureWpfApplication();
                 Options options = Options.Parse(args);
+                _resultFile = options.ResultFile;
                 _runtimeDirectory = options.RuntimeDirectory;
+                Environment.SetEnvironmentVariable("MAXWELL_NOTIFICATION_HOST", Path.Combine(_runtimeDirectory, "Maxwell.NotificationHost.exe"));
                 WorkflowDocument workflow = WorkflowDocument.Load(options.WorkflowFile);
                 DependencyReport dependencies = DependencyReport.Create(workflow.Xaml, _runtimeDirectory);
 
@@ -71,13 +97,18 @@ namespace Maxwell.RuntimeHost
                         "缺少 workflow 所需程序集：" + string.Join("、", dependencies.MissingAssemblies));
                 }
 
-                if (dependencies.RequiredAssemblies.Any(name => string.Equals(name, "OpenRPA.NM", StringComparison.OrdinalIgnoreCase)))
+                // Browser automation can live in a workflow reached through
+                // InvokeOpenRPA. Detect the complete call tree before deciding
+                // whether Native Messaging must be registered.
+                bool requiresChromeAutomation = RequiresChromeAutomation(workflow, options.WorkflowRoot);
+                string chromePreflightUrl = FindChromeLaunchUrl(workflow, options.WorkflowRoot);
+                if (requiresChromeAutomation)
                 {
                     EnsureBrowserNativeMessagingRegistration(_runtimeDirectory);
                 }
 
                 Dictionary<string, object> inputs = options.LoadArguments();
-                return Run(workflow, dependencies, inputs, options.WorkflowRoot);
+                return Run(workflow, dependencies, inputs, options.WorkflowRoot, requiresChromeAutomation, chromePreflightUrl);
             }
             catch (RuntimeFailureException ex)
             {
@@ -134,14 +165,35 @@ namespace Maxwell.RuntimeHost
             string sourceManifest = File.Exists(templatePath)
                 ? File.ReadAllText(templatePath)
                 : File.ReadAllText(manifestPath);
+            if (!Regex.IsMatch(sourceManifest, @"""path""\s*:\s*""[^""]*""", RegexOptions.CultureInvariant) ||
+                !Regex.IsMatch(sourceManifest, @"""name""\s*:\s*""[^""]*""", RegexOptions.CultureInvariant))
+            {
+                throw new RuntimeFailureException(
+                    "browser_manifest_invalid",
+                    "Native Messaging manifest 缺少 name 或 path：" + manifestPath);
+            }
             string escapedHostPath = hostExecutable.Replace("\\", "\\\\").Replace("\"", "\\\"");
             string updatedManifest = Regex.Replace(
                 sourceManifest,
                 @"(""path""\s*:\s*"")[^""]*("")",
                 match => match.Groups[1].Value + escapedHostPath + match.Groups[2].Value,
                 RegexOptions.CultureInvariant);
-
-            if (updatedManifest == sourceManifest)
+            updatedManifest = Regex.Replace(
+                updatedManifest,
+                @"(""name""\s*:\s*"")[^""]*("")",
+                match => match.Groups[1].Value + MaxwellNativeHostName + match.Groups[2].Value,
+                RegexOptions.CultureInvariant);
+            // The Chrome Web Store extension bundled in the isolated Maxwell
+            // profile still requests com.openrpa.msg. Keep a second manifest
+            // for that extension; edit mode restores the installed OpenRPA
+            // manifest before users return to the designer.
+            string officialManifest = Regex.Replace(
+                updatedManifest,
+                @"(""name""\s*:\s*"")[^""]*("")",
+                match => match.Groups[1].Value + OfficialNativeHostName + match.Groups[2].Value,
+                RegexOptions.CultureInvariant);
+            string officialManifestPath = Path.Combine(hostDirectory, "chromemanifest.openrpa.json");
+            if (updatedManifest.IndexOf(escapedHostPath, StringComparison.Ordinal) < 0)
             {
                 throw new RuntimeFailureException(
                     "browser_manifest_invalid",
@@ -149,8 +201,11 @@ namespace Maxwell.RuntimeHost
             }
 
             File.WriteAllText(manifestPath, updatedManifest, new UTF8Encoding(false));
-            RegisterBrowserNativeMessagingHost(@"Software\Google\Chrome\NativeMessagingHosts\com.openrpa.msg", manifestPath);
-            RegisterBrowserNativeMessagingHost(@"Software\Microsoft\Edge\NativeMessagingHosts\com.openrpa.msg", manifestPath);
+            File.WriteAllText(officialManifestPath, officialManifest, new UTF8Encoding(false));
+            RegisterBrowserNativeMessagingHost(@"Software\Google\Chrome\NativeMessagingHosts\com.maxwell.openrpa.msg", manifestPath);
+            RegisterBrowserNativeMessagingHost(@"Software\Microsoft\Edge\NativeMessagingHosts\com.maxwell.openrpa.msg", manifestPath);
+            RegisterBrowserNativeMessagingHost(@"Software\Google\Chrome\NativeMessagingHosts\com.openrpa.msg", officialManifestPath);
+            RegisterBrowserNativeMessagingHost(@"Software\Microsoft\Edge\NativeMessagingHosts\com.openrpa.msg", officialManifestPath);
         }
 
         private static void RegisterBrowserNativeMessagingHost(string registryPath, string manifestPath)
@@ -161,9 +216,40 @@ namespace Maxwell.RuntimeHost
             }
         }
 
-        private static int Run(WorkflowDocument workflow, DependencyReport dependencies, Dictionary<string, object> inputs, string workflowRoot)
+        private static int Run(
+            WorkflowDocument workflow,
+            DependencyReport dependencies,
+            Dictionary<string, object> inputs,
+            string workflowRoot,
+            bool requiresChromeAutomation,
+            string chromePreflightUrl)
         {
             string failureActivity = null;
+            Mutex browserRunMutex = null;
+            bool ownsBrowserRunMutex = false;
+            try
+            {
+                if (requiresChromeAutomation)
+                {
+                    string mutexName = @"Local\Maxwell.BrowserAutomation." +
+                        System.Diagnostics.Process.GetCurrentProcess().SessionId;
+                    browserRunMutex = new Mutex(false, mutexName);
+                    try
+                    {
+                        ownsBrowserRunMutex = browserRunMutex.WaitOne(TimeSpan.Zero);
+                    }
+                    catch (AbandonedMutexException)
+                    {
+                        ownsBrowserRunMutex = true;
+                    }
+                    if (!ownsBrowserRunMutex)
+                    {
+                        throw new RuntimeFailureException(
+                            "browser_automation_busy",
+                            "当前 Windows 会话中已有浏览器自动化流程正在执行。请等待该流程结束后重试。");
+                    }
+                }
+
             foreach (string assemblyName in dependencies.RequiredAssemblies)
             {
                 // Framework assemblies are resolved by .NET Framework itself. Loading
@@ -173,11 +259,34 @@ namespace Maxwell.RuntimeHost
                 LoadAssembly(assemblyName, _runtimeDirectory);
             }
 
+            if (requiresChromeAutomation &&
+                !dependencies.RequiredAssemblies.Any(name => string.Equals(name, "OpenRPA.NM", StringComparison.OrdinalIgnoreCase)))
+            {
+                // A root workflow may reach browser automation only through
+                // InvokeOpenRPA. Load NM before plugin discovery so its pipe client
+                // is initialized even though the root XAML has no NM namespace.
+                LoadAssembly("OpenRPA.NM", _runtimeDirectory);
+                dependencies.RequiredAssemblies.Add("OpenRPA.NM");
+                dependencies.RequiredAssemblies.Sort(StringComparer.OrdinalIgnoreCase);
+            }
+
             OpenRpaRuntimeBootstrap openRpaBootstrap = OpenRpaRuntimeBootstrap.TryInitialize(
                 dependencies.RequiredAssemblies,
                 _runtimeDirectory,
                 workflowRoot,
                 workflow.SourceFile);
+
+            if (requiresChromeAutomation)
+            {
+                EnsureChromeAutomationConnected(_runtimeDirectory, chromePreflightUrl);
+                Write(new RuntimeResponse
+                {
+                    success = true,
+                    action = "browser_automation_ready",
+                    workflowName = workflow.Name,
+                    details = "Chrome 浏览器扩展已与 Maxwell RuntimeHost 建立实际连接。"
+                });
+            }
 
             if (!string.IsNullOrWhiteSpace(workflow.Culture))
             {
@@ -188,8 +297,26 @@ namespace Maxwell.RuntimeHost
 
             Assembly localAssembly = FindLoadedAssembly("OpenRPA") ?? Assembly.GetExecutingAssembly();
             XamlXmlReaderSettings readerSettings = new XamlXmlReaderSettings { LocalAssembly = localAssembly };
+            int rootLegacySelectorConversions;
+            int rootChromeSelectorBindings;
+            int rootChromeLaunchBindings;
+            string executableXaml = ApplyBundledChromeCompatibility(
+                workflow.Xaml,
+                out rootLegacySelectorConversions,
+                out rootChromeSelectorBindings,
+                out rootChromeLaunchBindings);
+            if (rootChromeSelectorBindings > 0 || rootChromeLaunchBindings > 0)
+            {
+                Write(new RuntimeResponse
+                {
+                    success = true,
+                    action = "browser_selector_compatibility",
+                    workflowName = workflow.Name,
+                    details = "Bundled Chrome binding: selectors " + rootChromeSelectorBindings + ", StartProcess " + rootChromeLaunchBindings + "."
+                });
+            }
             Activity activity;
-            using (StringReader stringReader = new StringReader(workflow.Xaml))
+            using (StringReader stringReader = new StringReader(executableXaml))
             using (XamlXmlReader xamlReader = new XamlXmlReader(stringReader, readerSettings))
             {
                 activity = ActivityXamlServices.Load(xamlReader, new ActivityXamlServicesSettings
@@ -297,6 +424,551 @@ namespace Maxwell.RuntimeHost
             WaitForCompletion();
             Write(_result);
             return _result.success ? 0 : 1;
+            }
+            finally
+            {
+                if (ownsBrowserRunMutex) browserRunMutex.ReleaseMutex();
+                if (browserRunMutex != null) browserRunMutex.Dispose();
+            }
+        }
+
+        private static bool RequiresChromeAutomation(WorkflowDocument rootWorkflow, string workflowRoot)
+        {
+            Dictionary<string, WorkflowDocument> workflows = new Dictionary<string, WorkflowDocument>(StringComparer.OrdinalIgnoreCase);
+            AddWorkflowLookupKeys(workflows, rootWorkflow);
+
+            if (!string.IsNullOrWhiteSpace(workflowRoot) && Directory.Exists(workflowRoot))
+            {
+                foreach (string path in Directory.EnumerateFiles(workflowRoot, "*.json", SearchOption.AllDirectories))
+                {
+                    if (string.Equals(Path.GetFullPath(path), rootWorkflow.SourceFile, StringComparison.OrdinalIgnoreCase)) continue;
+                    try
+                    {
+                        AddWorkflowLookupKeys(workflows, WorkflowDocument.Load(path));
+                    }
+                    catch
+                    {
+                        // Registry loading reports malformed project files later. Browser
+                        // preflight discovery must not change that existing error path.
+                    }
+                }
+            }
+
+            return RequiresChromeAutomation(
+                rootWorkflow,
+                workflows,
+                new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+        }
+
+        private static string FindChromeLaunchUrl(WorkflowDocument rootWorkflow, string workflowRoot)
+        {
+            Dictionary<string, WorkflowDocument> workflows = new Dictionary<string, WorkflowDocument>(StringComparer.OrdinalIgnoreCase);
+            AddWorkflowLookupKeys(workflows, rootWorkflow);
+            if (!string.IsNullOrWhiteSpace(workflowRoot) && Directory.Exists(workflowRoot))
+            {
+                foreach (string path in Directory.EnumerateFiles(workflowRoot, "*.json", SearchOption.AllDirectories))
+                {
+                    if (string.Equals(Path.GetFullPath(path), rootWorkflow.SourceFile, StringComparison.OrdinalIgnoreCase)) continue;
+                    try { AddWorkflowLookupKeys(workflows, WorkflowDocument.Load(path)); }
+                    catch { }
+                }
+            }
+            return FindChromeLaunchUrl(rootWorkflow, workflows, new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+        }
+
+        private static string FindChromeLaunchUrl(
+            WorkflowDocument workflow,
+            IReadOnlyDictionary<string, WorkflowDocument> workflows,
+            HashSet<string> visited)
+        {
+            if (!visited.Add(workflow.SourceFile)) return null;
+            foreach (Match tag in StartProcessTag.Matches(workflow.Xaml))
+            {
+                Match filename = FilenameAttribute.Match(tag.Value);
+                Match arguments = ArgumentsAttribute.Match(tag.Value);
+                if (!filename.Success || !arguments.Success ||
+                    !IsChromeLaunchTarget(System.Net.WebUtility.HtmlDecode(filename.Groups["value"].Value))) continue;
+                string value = System.Net.WebUtility.HtmlDecode(arguments.Groups["value"].Value).Trim().Trim('"');
+                Uri uri;
+                if (Uri.TryCreate(value, UriKind.Absolute, out uri) &&
+                    (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps)) return value;
+            }
+            foreach (Match match in InvokeOpenRpaTag.Matches(workflow.Xaml))
+            {
+                string reference = NormalizeWorkflowReference(System.Net.WebUtility.HtmlDecode(match.Groups["value"].Value));
+                WorkflowDocument child;
+                string result;
+                if (workflows.TryGetValue(reference, out child) &&
+                    !string.IsNullOrWhiteSpace(result = FindChromeLaunchUrl(child, workflows, visited))) return result;
+            }
+            return null;
+        }
+
+        private static bool RequiresChromeAutomation(
+            WorkflowDocument workflow,
+            IReadOnlyDictionary<string, WorkflowDocument> workflows,
+            HashSet<string> visited)
+        {
+            if (!visited.Add(workflow.SourceFile)) return false;
+            if (Regex.IsMatch(workflow.Xaml, @"assembly\s*=\s*OpenRPA\.NM(?:[;\""'\s]|$)", RegexOptions.IgnoreCase) ||
+                workflow.Xaml.IndexOf("clr-namespace:OpenRPA.NM", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return true;
+            }
+
+            foreach (Match match in InvokeOpenRpaTag.Matches(workflow.Xaml))
+            {
+                string reference = NormalizeWorkflowReference(System.Net.WebUtility.HtmlDecode(match.Groups["value"].Value));
+                WorkflowDocument child;
+                if (workflows.TryGetValue(reference, out child) &&
+                    RequiresChromeAutomation(child, workflows, visited))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static void AddWorkflowLookupKeys(IDictionary<string, WorkflowDocument> workflows, WorkflowDocument workflow)
+        {
+            if (!string.IsNullOrWhiteSpace(workflow.ProjectAndName))
+                workflows[NormalizeWorkflowReference(workflow.ProjectAndName)] = workflow;
+            if (!string.IsNullOrWhiteSpace(workflow.Name))
+            {
+                string name = NormalizeWorkflowReference(workflow.Name);
+                if (!workflows.ContainsKey(name)) workflows[name] = workflow;
+            }
+        }
+
+        private static string NormalizeWorkflowReference(string value)
+        {
+            return (value ?? string.Empty).Replace('/', '\\').Trim();
+        }
+
+        private static void EnsureChromeAutomationConnected(string runtimeDirectory, string workflowUrl)
+        {
+            Assembly nmAssembly = LoadAssembly("OpenRPA.NM", runtimeDirectory, false);
+            Type hookType = nmAssembly == null ? null : nmAssembly.GetType("OpenRPA.NM.NMHook", false, false);
+            PropertyInfo connectedProperty = hookType == null
+                ? null
+                : hookType.GetProperty("chromeconnected", BindingFlags.Public | BindingFlags.Static);
+            if (connectedProperty == null)
+            {
+                throw new RuntimeFailureException(
+                    "browser_connection_probe_unavailable",
+                    "无法读取 OpenRPA 的 Chrome 实际连接状态；请确认 Maxwell 运行库完整。"
+                );
+            }
+
+            MethodInfo probeMethod = hookType.GetMethod(
+                "sendMessageChromeResult",
+                BindingFlags.Public | BindingFlags.Static,
+                null,
+                new[] { typeof(NativeMessagingMessage), typeof(TimeSpan) },
+                null);
+            if (probeMethod == null)
+            {
+                throw new RuntimeFailureException(
+                    "browser_connection_probe_unavailable",
+                    "OpenRPA Chrome connection probe is unavailable. Rebuild the Maxwell package.");
+            }
+
+            Func<bool> isConnected = () => (bool)(connectedProperty.GetValue(null, null) ?? false);
+            Func<bool> browserReplies = () => TryProbeChromeAutomation(isConnected, probeMethod);
+            // checkForPipes starts its named-pipe client asynchronously. Give an
+            // already-running, healthy browser bridge time to accept that client;
+            // killing the host during this window caused the extension's reconnect
+            // handlers to race and was the main source of intermittent cold starts.
+            System.Diagnostics.Stopwatch existingConnection = System.Diagnostics.Stopwatch.StartNew();
+            while (existingConnection.ElapsedMilliseconds < 3000)
+            {
+                if (browserReplies()) return;
+                Thread.Sleep(100);
+            }
+
+            // An enabled MV3 extension can still hold a native-messaging port
+            // whose host belongs to a previous RuntimeHost instance. The icon
+            // and site permission remain healthy, but that stale pipe never
+            // answers enumtabs. Recreate only Maxwell's local native host, then
+            // wake the extension so its disconnect handler reconnects it.
+            ResetStaleMaxwellNativeHostConnection();
+            string preflightUrl = StartChromeExtensionBackground(workflowUrl);
+            System.Diagnostics.Stopwatch stopwatch = System.Diagnostics.Stopwatch.StartNew();
+            while (stopwatch.ElapsedMilliseconds < ChromeConnectionTimeoutMilliseconds)
+            {
+                if (browserReplies())
+                {
+                    return;
+                }
+                Thread.Sleep(100);
+            }
+
+            throw new RuntimeFailureException(
+                "browser_not_connected",
+                "已检测到 OpenRPA 扩展，但扩展与 Native Messaging Host 的自动化通道未在规定时间内回复。" +
+                "Maxwell 已尝试重建连接，项目流程未开始执行。请完全关闭 Chrome 后重试。"
+            );
+        }
+
+        private static bool TryProbeChromeAutomation(Func<bool> isConnected, MethodInfo probeMethod)
+        {
+            if (!isConnected()) return false;
+
+            try
+            {
+                // Verify a real request/reply round trip. A connected named
+                // pipe by itself can be stale while Chrome is still unusable.
+                NativeMessagingMessage request = new NativeMessagingMessage("enumtabs", false, null)
+                {
+                    browser = "chrome"
+                };
+                object reply = probeMethod.Invoke(null, new object[] { request, TimeSpan.FromSeconds(1) });
+                return reply != null;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static void ResetStaleMaxwellNativeHostConnection()
+        {
+            string hostDirectory = Environment.GetEnvironmentVariable("MAXWELL_NATIVE_HOST_DIRECTORY");
+            if (string.IsNullOrWhiteSpace(hostDirectory)) return;
+            string expectedHost = Path.GetFullPath(Path.Combine(hostDirectory, "OpenRPA.NativeMessagingHost.exe"));
+
+            foreach (System.Diagnostics.Process process in System.Diagnostics.Process.GetProcessesByName("OpenRPA.NativeMessagingHost"))
+            {
+                using (process)
+                {
+                    try
+                    {
+                        string actualHost = process.MainModule == null ? null : process.MainModule.FileName;
+                        if (string.IsNullOrWhiteSpace(actualHost) ||
+                            !string.Equals(Path.GetFullPath(actualHost), expectedHost, StringComparison.OrdinalIgnoreCase))
+                        {
+                            continue;
+                        }
+
+                        // The native host owns the named-pipe server. A host left by a
+                        // previous RuntimeHost can retain a dead client connection, so
+                        // let the extension recreate only Maxwell's own host process.
+                        process.Kill();
+                        process.WaitForExit(2000);
+                    }
+                    catch
+                    {
+                        // If the process exits during inspection the extension will
+                        // recreate it naturally; connection polling remains authoritative.
+                    }
+                }
+            }
+        }
+
+        private static string StartChromeExtensionBackground(string workflowUrl)
+        {
+            string chromePath = ResolveChromeExecutable();
+            if (string.IsNullOrWhiteSpace(chromePath) || !File.Exists(chromePath))
+            {
+                throw new RuntimeFailureException(
+                    "chrome_not_found",
+                    "未找到可用于浏览器自动化预检的 Chrome。"
+                );
+            }
+
+            List<string> arguments = new List<string>
+            {
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--disable-default-apps",
+                "--new-window"
+            };
+            string profile = Environment.GetEnvironmentVariable("MAXWELL_BROWSER_PROFILE");
+            if (!string.IsNullOrWhiteSpace(profile))
+            {
+                arguments.Add("--user-data-dir=" + QuoteCommandLineArgument(profile));
+                arguments.Add("--profile-directory=Default");
+            }
+            string extension = Environment.GetEnvironmentVariable("MAXWELL_OPENRPA_EXTENSION");
+            if (!string.IsNullOrWhiteSpace(extension) && Directory.Exists(extension))
+            {
+                arguments.Add("--disable-extensions-except=" + QuoteCommandLineArgument(extension));
+                arguments.Add("--load-extension=" + QuoteCommandLineArgument(extension));
+            }
+            // Maxwell's private extension connects from its service-worker
+            // startup handler. A neutral page is sufficient and avoids exposing
+            // the OpenRPA settings page or pre-opening the workflow's business URL.
+            string preflightUrl = "about:blank";
+            arguments.Add(QuoteCommandLineArgument(preflightUrl));
+
+            try
+            {
+                using (System.Diagnostics.Process process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = chromePath,
+                    Arguments = string.Join(" ", arguments),
+                    WorkingDirectory = Path.GetDirectoryName(chromePath),
+                    // Do not let the long-lived browser inherit RuntimeHost's
+                    // redirected stdout/stderr handles. Otherwise Maxwell's
+                    // ReadToEnd waits until Chrome closes even after the
+                    // workflow process has already exited.
+                    UseShellExecute = true
+                }))
+                {
+                    // Chrome usually forwards this request to its existing browser
+                    // process, so the short-lived returned process is not awaited.
+                }
+            }
+            catch (Exception ex)
+            {
+                throw new RuntimeFailureException(
+                    "chrome_preflight_start_failed",
+                    "无法启动 Chrome 浏览器自动化预检：" + Unwrap(ex).Message
+                );
+            }
+
+            return preflightUrl;
+        }
+
+        private static void StartPreflightTabCleanup(Type hookType, string preflightUrl)
+        {
+            // Keep the preflight tab alive until the workflow opens or attaches to
+            // a real tab. Closing Chrome's only tab here would tear down the exact
+            // connection that was just verified.
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                try
+                {
+                    MethodInfo enumerateTabs = hookType.GetMethod("enumwindowandtabs", BindingFlags.Public | BindingFlags.Static);
+                    MethodInfo closeTab = hookType.GetMethod(
+                        "CloseTab",
+                        BindingFlags.Public | BindingFlags.Static,
+                        null,
+                        new[] { typeof(string), typeof(int) },
+                        null);
+                    FieldInfo tabsField = hookType.GetField("tabs", BindingFlags.Public | BindingFlags.Static);
+                    if (enumerateTabs == null || closeTab == null || tabsField == null) return;
+
+                    for (int attempt = 0; attempt < 300; attempt++)
+                    {
+                        enumerateTabs.Invoke(null, null);
+                        Thread.Sleep(100);
+                        IEnumerable tabs = tabsField.GetValue(null) as IEnumerable;
+                        if (tabs == null) continue;
+
+                        object preflightTab = null;
+                        bool hasRealChromeTab = false;
+                        foreach (object tab in tabs.Cast<object>().ToList())
+                        {
+                            Type tabType = tab.GetType();
+                            string browser = ReadStringMember(tabType, tab, "browser");
+                            string url = ReadStringMember(tabType, tab, "url");
+                            if (!string.Equals(browser, "chrome", StringComparison.OrdinalIgnoreCase)) continue;
+                            if (string.Equals(url, preflightUrl, StringComparison.OrdinalIgnoreCase)) preflightTab = tab;
+                            else if (!string.IsNullOrWhiteSpace(url)) hasRealChromeTab = true;
+                        }
+
+                        if (preflightTab == null) return; // Chrome reused the tab.
+                        if (!hasRealChromeTab)
+                        {
+                            Thread.Sleep(100);
+                            continue;
+                        }
+
+                        int tabId = ReadIntMember(preflightTab.GetType(), preflightTab, "id");
+                        closeTab.Invoke(null, new object[] { "chrome", tabId });
+                        return;
+                    }
+                }
+                catch
+                {
+                    // Cleanup is cosmetic. It must never alter workflow execution.
+                }
+            });
+        }
+
+        private static string ReadStringMember(Type type, object instance, string name)
+        {
+            PropertyInfo property = type.GetProperty(name, BindingFlags.Public | BindingFlags.Instance);
+            if (property != null) return property.GetValue(instance, null) as string;
+            FieldInfo field = type.GetField(name, BindingFlags.Public | BindingFlags.Instance);
+            return field == null ? null : field.GetValue(instance) as string;
+        }
+
+        private static int ReadIntMember(Type type, object instance, string name)
+        {
+            PropertyInfo property = type.GetProperty(name, BindingFlags.Public | BindingFlags.Instance);
+            object value = property == null
+                ? type.GetField(name, BindingFlags.Public | BindingFlags.Instance)?.GetValue(instance)
+                : property.GetValue(instance, null);
+            return value == null ? -1 : Convert.ToInt32(value, CultureInfo.InvariantCulture);
+        }
+
+        private static string ResolveChromeExecutable()
+        {
+            string bundled = Environment.GetEnvironmentVariable("MAXWELL_BUNDLED_CHROME");
+            if (!string.IsNullOrWhiteSpace(bundled) && File.Exists(bundled)) return bundled;
+
+            string[] registryPaths =
+            {
+                @"Software\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe",
+                @"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe"
+            };
+            foreach (RegistryKey root in new[] { Registry.CurrentUser, Registry.LocalMachine })
+            {
+                foreach (string path in registryPaths)
+                {
+                    using (RegistryKey key = root.OpenSubKey(path))
+                    {
+                        string candidate = key == null ? null : key.GetValue(string.Empty) as string;
+                        if (!string.IsNullOrWhiteSpace(candidate) && File.Exists(candidate)) return candidate;
+                    }
+                }
+            }
+
+            string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            string programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+            string programFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+            return new[]
+            {
+                Path.Combine(localAppData, "Google", "Chrome", "Application", "chrome.exe"),
+                Path.Combine(programFiles, "Google", "Chrome", "Application", "chrome.exe"),
+                Path.Combine(programFilesX86, "Google", "Chrome", "Application", "chrome.exe")
+            }.FirstOrDefault(File.Exists);
+        }
+
+        private static string QuoteCommandLineArgument(string value)
+        {
+            return "\"" + value.Replace("\"", "\\\"") + "\"";
+        }
+
+        // Existing OpenRPA workflows commonly record Chrome's system-wide
+        // installation path. Maxwell's bundled browser is intentionally stored
+        // under the current user's local profile, so adapt only that exact legacy
+        // path and only in memory. The shared workflow JSON is never modified.
+        private static string ApplyBundledChromeSelectorCompatibility(string xaml, out int conversionCount)
+        {
+            conversionCount = 0;
+            string bundledChrome = Environment.GetEnvironmentVariable("MAXWELL_BUNDLED_CHROME");
+            if (string.IsNullOrWhiteSpace(xaml) || string.IsNullOrWhiteSpace(bundledChrome) || !File.Exists(bundledChrome))
+            {
+                return xaml;
+            }
+
+            string selectorPath = bundledChrome.Replace("\\", "\\\\");
+            int replacements = 0;
+            string compatibleXaml = DefaultChromeSelectorPath.Replace(xaml, match =>
+            {
+                replacements++;
+                return match.Groups["prefix"].Value + selectorPath + match.Groups["suffix"].Value;
+            });
+            conversionCount = replacements;
+            return compatibleXaml;
+        }
+
+        private static string BindChromeSelectorsToBundledBrowser(string xaml, out int conversionCount)
+        {
+            conversionCount = 0;
+            string bundledChrome = Environment.GetEnvironmentVariable("MAXWELL_BUNDLED_CHROME");
+            if (string.IsNullOrWhiteSpace(xaml) || string.IsNullOrWhiteSpace(bundledChrome) || !File.Exists(bundledChrome)) return xaml;
+
+            int conversions = 0;
+            string compatibleXaml = SelectorAttribute.Replace(xaml, match =>
+            {
+                try
+                {
+                    string selectorText = System.Net.WebUtility.HtmlDecode(match.Groups["value"].Value);
+                    int marker = selectorText.IndexOf('%');
+                    if (marker < 0) return match.Value;
+
+                    JArray selectorItems = JArray.Parse(selectorText.Substring(marker + 1));
+                    int selectorConversions = 0;
+                    foreach (JToken token in selectorItems)
+                    {
+                        JObject item = token as JObject;
+                        if (item == null || !string.Equals((string)item["processname"], "chrome", StringComparison.OrdinalIgnoreCase)) continue;
+                        if (!string.Equals((string)item["filename"], bundledChrome, StringComparison.OrdinalIgnoreCase))
+                        {
+                            item["filename"] = bundledChrome;
+                            selectorConversions++;
+                        }
+                    }
+                    if (selectorConversions == 0) return match.Value;
+
+                    conversions += selectorConversions;
+                    string rewrittenSelector = selectorText.Substring(0, marker + 1) + selectorItems.ToString(Formatting.None);
+                    return match.Groups["prefix"].Value + System.Net.WebUtility.HtmlEncode(rewrittenSelector) + match.Groups["suffix"].Value;
+                }
+                catch (JsonException)
+                {
+                    return match.Value;
+                }
+            });
+            conversionCount = conversions;
+            return compatibleXaml;
+        }
+
+        private static string BindChromeStartProcessesToBundledBrowser(string xaml, out int conversionCount)
+        {
+            conversionCount = 0;
+            string bundledChrome = Environment.GetEnvironmentVariable("MAXWELL_BUNDLED_CHROME");
+            string browserProfile = Environment.GetEnvironmentVariable("MAXWELL_BROWSER_PROFILE");
+            if (string.IsNullOrWhiteSpace(xaml) || string.IsNullOrWhiteSpace(bundledChrome) ||
+                string.IsNullOrWhiteSpace(browserProfile) || !File.Exists(bundledChrome) || !Directory.Exists(browserProfile)) return xaml;
+
+            int conversions = 0;
+            string compatibleXaml = StartProcessTag.Replace(xaml, tag =>
+            {
+                Match filename = FilenameAttribute.Match(tag.Value);
+                if (!filename.Success || !IsChromeLaunchTarget(System.Net.WebUtility.HtmlDecode(filename.Groups["value"].Value))) return tag.Value;
+
+                string rewrittenTag = FilenameAttribute.Replace(tag.Value,
+                    "Filename=\"" + System.Net.WebUtility.HtmlEncode(bundledChrome) + "\"", 1);
+                Match arguments = ArgumentsAttribute.Match(rewrittenTag);
+                string profileArguments = "--user-data-dir=\"" + browserProfile + "\" --profile-directory=Default";
+                if (arguments.Success)
+                {
+                    string existingArguments = System.Net.WebUtility.HtmlDecode(arguments.Groups["value"].Value);
+                    if (existingArguments.IndexOf("--user-data-dir", StringComparison.OrdinalIgnoreCase) < 0)
+                    {
+                        string mergedArguments = (existingArguments + " " + profileArguments).Trim();
+                        rewrittenTag = ArgumentsAttribute.Replace(rewrittenTag,
+                            "Arguments=\"" + System.Net.WebUtility.HtmlEncode(mergedArguments) + "\"", 1);
+                    }
+                }
+                else
+                {
+                    rewrittenTag = rewrittenTag.TrimEnd('>', '/') + " Arguments=\"" +
+                        System.Net.WebUtility.HtmlEncode(profileArguments) + "\" />";
+                }
+                conversions++;
+                return rewrittenTag;
+            });
+            conversionCount = conversions;
+            return compatibleXaml;
+        }
+
+        private static bool IsChromeLaunchTarget(string filename)
+        {
+            if (string.IsNullOrWhiteSpace(filename)) return false;
+            string normalized = filename.Trim();
+            return string.Equals(normalized, "chrome", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(normalized, "chrome.exe", StringComparison.OrdinalIgnoreCase) ||
+                   normalized.EndsWith("\\Google\\Chrome\\Application\\chrome.exe", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string ApplyBundledChromeCompatibility(string xaml, out int legacySelectorConversions, out int selectorBindings, out int launchBindings)
+        {
+            // Workflows must run exactly as they were authored.  Rewriting their XAML
+            // in a headless host can subtly change NativeActivity scheduling (in
+            // particular InvokeOpenRPA/StartProcess), which is worse than a selector
+            // compatibility miss: it can make the host report a false completion.
+            // Browser compatibility is therefore handled outside the workflow XAML.
+            legacySelectorConversions = 0;
+            selectorBindings = 0;
+            launchBindings = 0;
+            return xaml;
         }
 
         private static void WaitForCompletion()
@@ -427,7 +1099,15 @@ namespace Maxwell.RuntimeHost
 
         private static void Write(object value)
         {
-            Console.Out.WriteLine(JsonConvert.SerializeObject(value, Formatting.None));
+            string json = JsonConvert.SerializeObject(value, Formatting.None);
+            if (!string.IsNullOrWhiteSpace(_resultFile))
+            {
+                string parent = Path.GetDirectoryName(_resultFile);
+                if (!string.IsNullOrWhiteSpace(parent)) Directory.CreateDirectory(parent);
+                File.WriteAllText(_resultFile, json, new System.Text.UTF8Encoding(false));
+                return;
+            }
+            Console.Out.WriteLine(json);
             Console.Out.Flush();
         }
 
@@ -438,6 +1118,7 @@ namespace Maxwell.RuntimeHost
             public string RuntimeDirectory { get; private set; }
             public string ArgumentsFile { get; private set; }
             public string WorkflowRoot { get; private set; }
+            public string ResultFile { get; private set; }
 
             public static Options Parse(string[] args)
             {
@@ -458,6 +1139,7 @@ namespace Maxwell.RuntimeHost
                     if (args[index] == "--runtime-dir") result.RuntimeDirectory = Path.GetFullPath(args[index + 1]);
                     else if (args[index] == "--arguments") result.ArgumentsFile = Path.GetFullPath(args[index + 1]);
                     else if (args[index] == "--workflow-root") result.WorkflowRoot = Path.GetFullPath(args[index + 1]);
+                    else if (args[index] == "--result-file") result.ResultFile = Path.GetFullPath(args[index + 1]);
                     else throw new RuntimeFailureException("invalid_arguments", "未知参数：" + args[index]);
                 }
                 return result;
@@ -475,6 +1157,7 @@ namespace Maxwell.RuntimeHost
         private sealed class WorkflowDocument
         {
             public string Name { get; private set; }
+            public string ProjectAndName { get; private set; }
             public string Xaml { get; private set; }
             public string Culture { get; private set; }
             public string SourceFile { get; private set; }
@@ -494,6 +1177,7 @@ namespace Maxwell.RuntimeHost
                 return new WorkflowDocument
                 {
                     Name = (string)json["name"] ?? Path.GetFileNameWithoutExtension(path),
+                    ProjectAndName = (string)json["projectandname"],
                     Xaml = xaml,
                     Culture = (string)json["culture"],
                     SourceFile = Path.GetFullPath(path)
@@ -592,7 +1276,7 @@ namespace Maxwell.RuntimeHost
                         success = true,
                         action = "openrpa_runtime_initialized",
                         requiredAssemblies = requiredAssemblies.OrderBy(value => value).ToList(),
-                        details = "本地项目 " + registry.ProjectCount + " 个，workflow " + registry.WorkflowCount + " 个"
+                        details = "本地项目 " + registry.ProjectCount + " 个，workflow " + registry.WorkflowCount + " 个；已绑定内置 Chrome selector " + registry.ChromeSelectorConversionCount + " 个，StartProcess " + registry.ChromeLaunchBindingCount + " 个"
                     });
                     return new OpenRpaRuntimeBootstrap(client, extensionTypes, openRpaAssembly);
                 }
@@ -671,6 +1355,22 @@ namespace Maxwell.RuntimeHost
                         string json = File.ReadAllText(jsonFile);
                         JObject document = JObject.Parse(json);
                         if (!string.Equals((string)document["_type"], "workflow", StringComparison.OrdinalIgnoreCase)) continue;
+                        string workflowXaml = (string)document["Xaml"];
+                        int legacySelectorConversions;
+                        int selectorBindings;
+                        int launchBindings;
+                        string compatibleXaml = ApplyBundledChromeCompatibility(
+                            workflowXaml,
+                            out legacySelectorConversions,
+                            out selectorBindings,
+                            out launchBindings);
+                        if (selectorBindings > 0 || launchBindings > 0)
+                        {
+                            document["Xaml"] = compatibleXaml;
+                            json = document.ToString(Formatting.None);
+                            report.ChromeSelectorConversionCount += selectorBindings;
+                            report.ChromeLaunchBindingCount += launchBindings;
+                        }
                         string workflowId = ((string)document["_id"] ?? string.Empty).Trim();
                         string projectAndName = ((string)document["projectandname"] ?? string.Empty)
                             .Replace('/', '\\')
@@ -815,6 +1515,8 @@ namespace Maxwell.RuntimeHost
             {
                 public int ProjectCount { get; set; }
                 public int WorkflowCount { get; set; }
+                public int ChromeSelectorConversionCount { get; set; }
+                public int ChromeLaunchBindingCount { get; set; }
             }
         }
 
