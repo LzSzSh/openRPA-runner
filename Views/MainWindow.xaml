@@ -6,6 +6,7 @@
         xmlns:models="clr-namespace:OpenRpaWorkflowLauncher.Models"
         mc:Ignorable="d"
         Title="Maxwell麦威数字助手"
+        Icon="/Assets/Maxwell.ico"
         Width="1180"
         Height="780"
         MinWidth="980"

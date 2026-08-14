@@ -54,6 +54,10 @@ public sealed class MaxwellRuntimeRunner
             startInfo.ArgumentList.Add(ResolveWorkflowRoot(workflow));
             startInfo.ArgumentList.Add("--result-file");
             startInfo.ArgumentList.Add(resultFile);
+            // NotificationHost is intentionally long-lived across workflows,
+            // but it belongs to this Maxwell GUI instance. Child processes
+            // inherit this value and use it to exit when Maxwell closes.
+            startInfo.Environment["MAXWELL_OWNER_PROCESS_ID"] = Environment.ProcessId.ToString();
 
             // Native Messaging is needed by both distribution variants. The
             // bundled-browser package ships a profile with the extension

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
 using System.Text;
@@ -14,8 +15,8 @@ namespace Maxwell.NotificationHost
 {
     internal static class Program
     {
-        private const string PipeName = "maxwell-notification-host-v1";
-        private const string MutexName = "Local\\Maxwell.NotificationHost.v1";
+        private const string PipeNamePrefix = "maxwell-notification-host-v2-";
+        private const string MutexNamePrefix = "Local\\Maxwell.NotificationHost.v2.";
 
         [STAThread]
         private static int Main(string[] args)
@@ -32,36 +33,51 @@ namespace Maxwell.NotificationHost
                 return 3;
             }
 
+            int ownerProcessId = ReadOwnerProcessId();
+            string ownerKey = ownerProcessId > 0 ? ownerProcessId.ToString() : "legacy";
+            string pipeName = PipeNamePrefix + ownerKey;
+            string mutexName = MutexNamePrefix + ownerKey;
+
             // The normal path: hand this notification to the already-running
             // manager, which owns the screen positions for every toast.
-            if (TrySend(args[0], message, 250)) return 0;
+            if (TrySend(pipeName, args[0], message, 250)) return 0;
 
             bool createdNew;
-            using (var mutex = new Mutex(true, MutexName, out createdNew))
+            using (var mutex = new Mutex(true, mutexName, out createdNew))
             {
                 if (!createdNew)
                 {
                     // A manager is starting up. Give its pipe a moment to open
                     // rather than starting a second overlapping window.
-                    return TrySend(args[0], message, 2000) ? 0 : 4;
+                    return TrySend(pipeName, args[0], message, 2000) ? 0 : 4;
                 }
 
                 var application = new Application
                 {
                     ShutdownMode = ShutdownMode.OnExplicitShutdown
                 };
-                var manager = new NotificationManager(application);
+                var manager = new NotificationManager(application, pipeName, ownerProcessId);
                 manager.Start(args[0], message);
                 application.Run();
                 return 0;
             }
         }
 
-        private static bool TrySend(string notificationType, string message, int timeoutMilliseconds)
+        private static int ReadOwnerProcessId()
+        {
+            int ownerProcessId;
+            return int.TryParse(
+                Environment.GetEnvironmentVariable("MAXWELL_OWNER_PROCESS_ID"),
+                out ownerProcessId) && ownerProcessId > 0
+                ? ownerProcessId
+                : 0;
+        }
+
+        private static bool TrySend(string pipeName, string notificationType, string message, int timeoutMilliseconds)
         {
             try
             {
-                using (var client = new NamedPipeClientStream(".", PipeName, PipeDirection.Out))
+                using (var client = new NamedPipeClientStream(".", pipeName, PipeDirection.Out))
                 {
                     client.Connect(timeoutMilliseconds);
                     using (var writer = new StreamWriter(client, new UTF8Encoding(false)))
@@ -86,22 +102,47 @@ namespace Maxwell.NotificationHost
 
     internal sealed class NotificationManager
     {
-        private const string PipeName = "maxwell-notification-host-v1";
         private const double WindowGap = 10;
         private const double ScreenMargin = 12;
         private readonly Application _application;
+        private readonly string _pipeName;
+        private readonly int _ownerProcessId;
         private readonly List<NotificationWindow> _windows = new List<NotificationWindow>();
         private bool _arrangePending;
 
-        public NotificationManager(Application application)
+        public NotificationManager(Application application, string pipeName, int ownerProcessId)
         {
             _application = application;
+            _pipeName = pipeName;
+            _ownerProcessId = ownerProcessId;
         }
 
         public void Start(string notificationType, string message)
         {
             Task.Run((Action)ListenForNotifications);
+            if (_ownerProcessId > 0) Task.Run((Action)MonitorOwnerProcess);
             Show(notificationType, message);
+        }
+
+        private void MonitorOwnerProcess()
+        {
+            try
+            {
+                using (Process owner = Process.GetProcessById(_ownerProcessId))
+                {
+                    if (!owner.HasExited) owner.WaitForExit();
+                }
+            }
+            catch (ArgumentException)
+            {
+                // The owner closed before the monitor attached.
+            }
+            catch (InvalidOperationException)
+            {
+                // Treat an inaccessible/exited owner as closed.
+            }
+
+            _application.Dispatcher.BeginInvoke(new Action(() => _application.Shutdown()));
         }
 
         private void ListenForNotifications()
@@ -110,7 +151,7 @@ namespace Maxwell.NotificationHost
             {
                 try
                 {
-                    using (var server = new NamedPipeServerStream(PipeName, PipeDirection.In, 1, PipeTransmissionMode.Byte, PipeOptions.None))
+                    using (var server = new NamedPipeServerStream(_pipeName, PipeDirection.In, 1, PipeTransmissionMode.Byte, PipeOptions.None))
                     {
                         server.WaitForConnection();
                         using (var reader = new StreamReader(server, Encoding.UTF8))

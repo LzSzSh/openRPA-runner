@@ -607,15 +607,23 @@ public sealed class MainViewModel : ObservableObject
             }
 
             workflow.LastRunStatus = "执行失败";
-            SetStatus($"执行失败：{ex.Message}", "Error");
             AddLog($"执行失败：{workflow.WorkflowName}，{ex.Message}");
             if (showFailureDialog)
             {
+                // The modal dialog is the single user-facing failure notice.
+                // Do not duplicate the same long exception in the status card.
+                SetStatus("空闲", "Idle");
                 System.Windows.MessageBox.Show(
                     ex.Message,
                     "执行失败",
                     System.Windows.MessageBoxButton.OK,
                     System.Windows.MessageBoxImage.Error);
+            }
+            else
+            {
+                // Scheduled runs have no modal dialog, so retain a compact
+                // in-app status while the full diagnostics stay in the log.
+                SetStatus($"执行失败：{workflow.WorkflowName}", "Error");
             }
         }
         finally
